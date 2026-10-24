@@ -1,0 +1,20 @@
+# Met à jour les PR vers `dev` à chaque avancée de `dev` (socle Mathilde-Team).
+# La logique est dans Mathilde-Team/.github (maj-branches-reutilisable.yml).
+name: Mise à jour des branches de PR
+
+"on":
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maj-branches-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  maj:
+    uses: Mathilde-Team/.github/.github/workflows/maj-branches-reutilisable.yml@main
+    secrets: inherit
