@@ -17,8 +17,9 @@ limites révélées — contre de vrais serveurs tiers (TigerVNC/Xvnc les
 été trouvé et corrigé sur VeNCrypt, le test xvp du 2026-09-09 a révélé
 que TigerVNC ne supporte pas cette extension et ferme la connexion en
 réponse à un message xvp non reconnu, le test ZYWRLE du 2026-09-09 a
-révélé qu'un vrai QEMU envoie des tuiles hors spec (subencoding 17-126)
-une fois son chemin lossy engagé, et le test Extended Clipboard du
+révélé une désynchronisation du flux (subencodings 17-126) une fois le
+chemin lossy de QEMU engagé — cause trouvée et corrigée le 2026-10-24,
+issue #22 — et le test Extended Clipboard du
 2026-09-13 a révélé qu'un `Provide` non précédé d'un `Notify` du même
 émetteur est silencieusement ignoré par TigerVNC **et** par QEMU,
 chacun pour une raison mécanique différente — dans les quatre cas,
@@ -187,16 +188,18 @@ puis 2026-09-16 deux fois pour MSLogonII et SASL) :
   contre TigerVNC (presse-papiers X réel via `xclip`) et en relais à
   deux connexions contre QEMU. Voir `docs/features-backlog.md` et
   `docs/sessions/session-14-2026-09-13.md` pour le détail complet.
-- **ZYWRLE (17)** — testé contre un vrai QEMU 8.2.2 (TigerVNC/Xvnc
-  1.13.1 n'implémente pas ZYWRLE du tout). Hypothèse initiale
-  (« aucun changement client nécessaire ») **infirmée** : `Enc.ZYWRLE`
-  ajouté, décodage partagé avec `Enc.ZRLE` pour les tuiles standard,
-  mais le chemin lossy réel de QEMU envoie des subencodings 17-126
-  réservés par la RFC, qu'aucun décodeur conforme ne peut décoder sans
-  deviner un format non documenté — refus explicite (`ValueError`)
-  plutôt qu'un décodage silencieusement faux, `Enc.ZYWRLE` exclu de
-  `Enc.default()`. Voir `docs/features-backlog.md` et
-  `docs/sessions/session-11-2026-09-09.md` pour le détail complet.
+- **ZYWRLE (17)** — **décodage complet depuis le 2026-10-24 (issue
+  #22)**, vérifié contre un vrai QEMU 10.2.1 (`lossy=on`, niveaux 1 à 3).
+  Une tuile ZYWRLE est un octet de subencoding 0 suivi d'une tuile ZRLE
+  imbriquée complète (coefficients d'ondelettes) ; le niveau vaut
+  3 - qualité JPEG // 3 (jamais transmis). Les subencodings 17-126 vus
+  le 2026-09-09 (QEMU 8.2.2) étaient une désynchronisation (tuile
+  imbriquée lue comme du Raw), pas un format : ils restent refusés
+  (`ValueError`). `_zywrle_synthesize()` est un port octet par octet de
+  `ZYWRLE_SYNTHESIZE` (libvncserver), validé contre le C compilé.
+  `Enc.ZYWRLE` reste exclu de `Enc.default()` parce qu'il est à perte.
+  Voir `docs/sessions/session-25-2026-10-24.md` (l'historique est dans
+  `docs/sessions/session-11-2026-09-09.md`).
 - **xvp** — testé contre un vrai TigerVNC/Xvnc 1.13.1. Résultat : ce
   serveur ne supporte PAS xvp et ferme la connexion en réponse à un
   message xvp non reconnu (docstrings corrigées en conséquence) — voir

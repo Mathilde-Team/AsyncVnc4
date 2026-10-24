@@ -76,7 +76,7 @@ jobs:
         run: uv run -p 3.9 python3 -m unittest test_asyncvnc2 test_reseau_local test_decodage_video test_loguru_regles -v
 
       - name: Version minimale (vermin)
-        run: uvx vermin --no-tips --eval-annotations -t=3.9- --violations asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_qemu_sasl.py test_loguru_regles.py scripts/audit_debug_sorties.py
+        run: uvx vermin --no-tips --eval-annotations -t=3.9- --violations asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_qemu_sasl.py test_live_qemu_zywrle.py test_loguru_regles.py scripts/audit_debug_sorties.py
 
   live:
     # Issues #28 et #27 : repli de version et connexion inversée contre un
@@ -141,3 +141,10 @@ jobs:
         env:
           ASYNCVNC_LIVE: "1"
         run: uv run python3 -m unittest test_live_qemu_sasl -v
+
+      - name: Tests ZYWRLE contre QEMU
+        # Issue #22 : tuiles à perte (lossy=on), niveaux 1 à 3, vérité
+        # terrain = screendump du moniteur QEMU.
+        env:
+          ASYNCVNC_LIVE: "1"
+        run: uv run python3 -m unittest test_live_qemu_zywrle -v
