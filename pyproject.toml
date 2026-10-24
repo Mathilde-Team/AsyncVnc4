@@ -39,8 +39,9 @@ source = ["asyncvnc2"]
 [tool.coverage.report]
 # Seuil bloquant de l'équipe : 95 % visé (décision du 21/10/2026,
 # Mathilde-Team/.github#9). Palier 1 (issue #54) : mesure du job Qualité au
-# 22/10/2026 (51,32 % lignes + branches, test_asyncvnc2 + test_reseau_local)
-# arrondie à l'entier inférieur ; à relever à chaque PR de tests. Déclaré ici
-# seulement, lu par `coverage report` dans ci.yml.
-fail_under = 51
+# 22/10/2026 (51,32 %). Palier 2 (issue #54) : 74,17 % lignes + branches au
+# 24/10/2026 avec test_decodage_video (décodeurs Tight, Hextile, ZlibHex, TRLE,
+# curseurs, ExtendedDesktopSize), arrondi à l'entier inférieur ; à relever à
+# chaque PR de tests. Déclaré ici seulement, lu par `coverage report` dans ci.yml.
+fail_under = 74
 show_missing = true

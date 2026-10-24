@@ -5,6 +5,7 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Les numéros 
 ## [Non publié]
 
 ### Ajouté
+- **ZYWRLE complet** (#22) : décodage des tuiles à perte de QEMU. Une tuile Raw d'un rectangle ZYWRLE contient une tuile ZRLE imbriquée (coefficients d'ondelettes), reconstruite par `_zywrle_synthesize()`, port octet par octet de `ZYWRLE_SYNTHESIZE` (libvncserver). Le niveau (3 - qualité // 3) est déduit de `jpeg_quality`, désormais conservé par `Video`. Vérifié contre QEMU 10.2.1 (`test_live_qemu_zywrle.py`, job « Serveur réel »). `Enc.ZYWRLE` reste hors `Enc.default()` (à perte).
 - **Couverture bloquante, palier 1** (#54) : `[tool.coverage]` dans `pyproject.toml` (branches activées, `fail_under = 51`, seuil déclaré une seule fois) ; le job Qualité lance `coverage run` puis `coverage report`. La couverture passe de 34,89 % à 51,32 % (lignes + branches).
 - **`test_reseau_local.py`** (27 tests) : un serveur RFB minimal sur 127.0.0.1 dialogue avec les vrais `connect()` et `listen()`, en TCP brut et en WebSocket. Les tests couvrent les versions 3.3/3.7/3.8, les versions mineures inconnues et majeures récentes, l'authentification VNC (DES) réussie ou refusée, les refus avec motif, SetPixelFormat, SetEncodings (qualité JPEG, compression) et une image Raw relue pixel par pixel. La poignée de main WebSocket est vérifiée contre le vecteur de la RFC 6455 §1.3.
 - **Tests contre TigerVNC Xvnc** (#27) : `test_live_xvnc.py` (chaque encodage relu contre la couleur de `xsetroot`, `listen()` + `vncconfig -connect`), lancé par le job « Serveur réel ».
@@ -13,6 +14,9 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Les numéros 
 ### Corrigé
 - **Tight en mode `bgra`/`abgr`** (#27) : les TPIXEL (3 octets, toujours R, G, B) étaient lus dans l'ordre du mode client, rouge et bleu inversés (remplissage, JPEG/PNG, blocs de base).
 - **`screenshot()` bloqué avec TigerVNC** (#27) : après une mise à jour qui ne contient que `ExtendedDesktopSize`, la capture redemande en incrémental au lieu de boucler sur des demandes complètes.
+
+### Corrigé
+- **ZYWRLE** (#22) : les subencodings 17-126 levés contre QEMU (`lossy=on`) venaient d'une désynchronisation du flux (tuile imbriquée lue comme du Raw) ; ils disparaissent avec le décodage de la tuile imbriquée.
 
 ## [0.1.0] - 2026-10-22
 

@@ -26,7 +26,7 @@ mais non confirmé contre une source fraîche — 🔲 non implémenté.
 | Curseur (Rich Cursor / X Cursor / Cursor With Alpha) | ✅ (fork d'origine) |
 | Desktop Size / Extended Desktop Size | ✅ (fork d'origine) |
 | Last Rect / Fence / Continuous Updates | ✅ (fork d'origine) |
-| ZYWRLE (17) | ⚠️ **2026-09-09 : testé pour de vrai — hypothèse initiale infirmée, gap réel trouvé et documenté (pas corrigé).** → [issue #22](https://github.com/MathildeDec/AsyncVnc4/issues/22) (P1-haute, Track A) `Enc.ZYWRLE = 17` ajouté, décodage partagé avec `Enc.ZRLE` (`process_xrle`, même format fil) — **mais volontairement absent de `Enc.default()`** : un vrai QEMU 8.2.2 (`-vnc :N,lossy=on`, `jpeg_quality<9`), seul serveur réel trouvé dans ce sandbox qui implémente vraiment ZYWRLE (TigerVNC/Xvnc 1.13.1 ne l'implémente pas du tout — confirmé par absence totale de la chaîne « ywrle » dans son binaire, alors qu'elle est présente dans celui de QEMU), envoie réellement des octets de subencoding de tuile dans la plage 17-126, explicitement réservée « unused » par `rfbproto.rst`/RFC 6143 (aucun format de bit-packing n'est défini au-delà d'une taille de palette de 16) — voir `docs/sessions/session-11-2026-09-09.md` pour le détail complet (trace tuile par tuile, deux hypothèses de format testées et infirmées). Le décodeur refuse explicitement (`ValueError`) plutôt que de deviner un format non documenté et risquer de corrompre l'image en silence. Confirmé sûr sans ZYWRLE négocié (`Enc.ZRLE` seul, même serveur/mêmes réglages lossy) et avec ZYWRLE négocié mais `quality=9` (le serveur reste alors en ZRLE classique côté encodeur) : 5 rafraîchissements de suite dans les deux cas, aucun crash |
+| ZYWRLE (17) | ✅ **2026-10-24 (issue #22) : décodage complet, testé contre un vrai QEMU 10.2.1** (`-vnc :N,lossy=on`, qualités 0/4/7 → niveaux 3/2/1, PSNR 21,1 / 26,0 / 55,9 dB contre le `screendump` du moniteur ; qualité 9 et ZRLE seul : identiques au pixel près). Format (QEMU `ui/vnc-enc-zrle.c.inc`, libvncclient `zrle.c`) : dans une tuile Raw (subencoding 0), le serveur envoie une **tuile ZRLE imbriquée complète** dont les pixels sont les coefficients d'ondelettes PLHarr ; le niveau vaut 3 - qualité JPEG // 3 et n'est jamais transmis. `_zywrle_synthesize()` est un port octet par octet de `ZYWRLE_SYNTHESIZE` (libvncserver), validé contre le C compilé (vecteurs SHA-256 dans `ZywrleTests`). Les subencodings 17-126 vus le 2026-09-09 (QEMU 8.2.2) étaient une désynchronisation du flux (tuile imbriquée lue comme du Raw), toujours refusés (`ValueError`). `Enc.ZYWRLE` reste opt-in (hors `Enc.default()`) car à perte. Test réel : `test_live_qemu_zywrle.py` (job CI « Serveur réel »). Détail : `docs/sessions/session-25-2026-10-24.md` ; historique : `docs/sessions/session-11-2026-09-09.md` |
 
 ## Authentification
 
@@ -131,6 +131,8 @@ d'audit » et « Confirmation avant commande xvp destructive » ci-dessus.
   partiellement atteint : un vrai gap a été trouvé et documenté (pas
   silencieusement laissé en hypothèse non vérifiée), mais pas corrigé —
   `Enc.ZYWRLE` reste opt-in uniquement, exclu de `Enc.default()`.
+  ✅ **2026-10-24 (issue #22)** : corrigé — tuile imbriquée, voir la
+  ligne ZYWRLE ci-dessus et `docs/sessions/session-25-2026-10-24.md`.
 - xvp : ~~test réel contre un serveur qui supporte l'extension (TigerVNC
   la supporte côté serveur)~~ ✅ **2026-09-09** — testé contre un vrai
   `Xtigervnc`/`Xvnc` 1.13.1 (installé via `apt`). Résultat inattendu :
@@ -419,7 +421,7 @@ Issues de session fermées : [#1](https://github.com/MathildeDec/AsyncVnc4/issue
 
 | Issue | Priorité | Track | Ordre | Titre | Statut |
 |-------|----------|-------|-------|-------|--------|
-| [#22](https://github.com/MathildeDec/AsyncVnc4/issues/22) | 🔴 P1-Haute | A — Code/Features | 1/4 | ZYWRLE — décoder les tuiles lossy (subencodings 17-126) | Faisable maintenant |
+| [#22](https://github.com/MathildeDec/AsyncVnc4/issues/22) | 🔴 P1-Haute | A — Code/Features | 1/4 | ZYWRLE — décoder les tuiles lossy (subencodings 17-126) | Fait (2026-10-24, PR vers dev) |
 | [#34](https://github.com/MathildeDec/AsyncVnc4/issues/34) | 🔴 P1-Haute | A — Code/Features | 2/4 | Intégration des extensions dans pluginvnc2 (downstream) | Faisable maintenant |
 | [#27](https://github.com/MathildeDec/AsyncVnc4/issues/27) | 🟡 P2-Moyenne | B — Tests serveurs réels | 1/6 | `listen()` — test contre vrai serveur VNC / NAT | Hors sandbox |
 | [#28](https://github.com/MathildeDec/AsyncVnc4/issues/28) | 🟡 P2-Moyenne | B — Tests serveurs réels | 2/6 | Repli de version — test contre un vrai serveur 3.3 | Hors sandbox |
