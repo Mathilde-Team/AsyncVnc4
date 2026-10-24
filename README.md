@@ -27,7 +27,7 @@ Détail complet dans [`CLAUDE.md`](./CLAUDE.md), [`docs/features-backlog.md`](./
 
 | Catégorie | Fonctionnalités |
 |-----------|----------------|
-| Encodages | Tight, ZRLE, Hextile, CoRRE, RRE, Copy, Curseur, ZYWRLE (partiel) |
+| Encodages | Tight, ZRLE, Hextile, CoRRE, RRE, Copy, Curseur, ZYWRLE (à perte, opt-in) |
 | Authentification | VNC Auth, Apple ARD, VeNCrypt (6 sous-types), RSA-AES (RA2/RA2_256), MSLogonII, SASL (PLAIN/ANONYMOUS) |
 | Transport | WebSockets (client + serveur), reconnexion inversée (`listen()`), repli 3.3/3.7/3.8 |
 | Extensions | xvp, Extended Clipboard, QEMU Extended Key Event, `send_set_desktop_size()` |

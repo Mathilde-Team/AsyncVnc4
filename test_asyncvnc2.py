@@ -14,6 +14,7 @@ Lancer avec : python3 -m unittest test_asyncvnc2 -v
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import unittest
 import zlib
 
@@ -41,6 +42,7 @@ from asyncvnc2 import (
     UpdateType,
     Video,
     _lzo1x_decompress,
+    _zywrle_synthesize,
 )
 
 
@@ -164,34 +166,142 @@ class CoRRETests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((video.data[0, 0, :] == np.frombuffer(bg, 'B')).all())
 
 
+def _lcg_octets(n: int, graine: int) -> np.ndarray:
+    """Octets pseudo-aléatoires reproductibles (même suite que le générateur des vecteurs C)."""
+    x = (np.arange(n, dtype=np.uint64) * np.uint64(2654435761) + np.uint64(graine)) & np.uint64(
+        0xFFFFFFFF
+    )
+    x = (x * np.uint64(1103515245) + np.uint64(12345)) & np.uint64(0xFFFFFFFF)
+    return ((x >> np.uint64(16)) & np.uint64(0xFF)).astype(np.uint8)
+
+
 class ZywrleTests(unittest.IsolatedAsyncioTestCase):
     """
-    Enc.ZYWRLE (17) -- voir docs/sessions/session-11-2026-09-09.md pour
-    l'investigation complète contre un vrai QEMU 8.2.2. Ce qui EST vérifié ici
-    (byte-exact, sans serveur réel) :
-      1) une tuile ZRLE "standard" (subencoding 0/1/2-16/127/128/130-255) est
-         décodée à l'identique que le raw_encoding négocié soit 16 (ZRLE) ou
-         17 (ZYWRLE) -- même chemin de code (process_xrle) ;
-      2) une valeur de subencoding 17-126 (réservée par rfbproto.rst/RFC
-         6143, mais réellement envoyée par QEMU 8.2.2 une fois son vrai
-         chemin lossy ZYWRLE engagé) est refusée explicitement (ValueError)
-         plutôt que décodée au hasard ;
-      3) Enc.default() n'annonce PAS ZYWRLE (opt-in manuel uniquement).
-    Ce qui n'est PAS vérifié ici (pas de format documenté ni confirmé) :
-    le contenu réel d'une tuile QEMU ZYWRLE avec subencoding 17-126.
+    Enc.ZYWRLE (17), issue #22 -- voir docs/sessions/session-25-2026-10-24.md.
+
+    Format (QEMU ``ui/vnc-enc-zrle.c.inc``, libvncclient ``zrle.c``) : une tuile
+    ZYWRLE est un octet de subencoding 0 suivi d'une tuile ZRLE imbriquée complète
+    (n'importe quel subencoding) dont les pixels sont des coefficients d'ondelettes ;
+    le niveau (1-3) vaut 3 - qualité JPEG // 3, jamais transmis. Vérifié ici :
+      1) _zywrle_synthesize() identique octet par octet à ``ZYWRLE_SYNTHESIZE`` de
+         libvncserver compilé (empreintes SHA-256 des sorties C, entrées
+         reproductibles) ;
+      2) décodage de bout en bout via Video.read() (tuile imbriquée Raw, unie,
+         palette) et niveau déduit de la qualité ;
+      3) sans qualité annoncée ou en ZRLE (16), une tuile 0 reste du Raw ;
+      4) un subencoding 17-126 reste refusé (ValueError) ;
+      5) Enc.default() n'annonce PAS ZYWRLE (opt-in, encodage avec perte).
+    Le test contre un vrai QEMU est dans test_live_qemu_zywrle.py.
     """
 
+    #: (largeur, hauteur, niveau, graine, sha256 de la sortie du C de libvncserver).
+    VECTEURS_C = (
+        (64, 64, 3, 1, '2454d82291abffb98ccb4a617aa9070300969b4da8cf85aa06e3049965dc980c'),
+        (64, 64, 2, 2, '2461f9242759c57cbab849a8e16df6da30999185b420e427b10bebdcbcc9e82c'),
+        (64, 64, 1, 3, '67159a1653b563b33119cdaa4e2144f4f4c6949435c54ab411a3c02e126ab32f'),
+        (37, 21, 1, 4, 'a9d0416a4f99d0579cd34c0cbfad24f9ba0419a5c9e2409ee561e63b72d561bd'),
+        (13, 64, 3, 5, '39b7a4ddac59d3f681d531e4d0cedcae0c1c31b9d9d6ef82ef70454fcb9d159f'),
+        (64, 50, 2, 6, '3461c725e387f6b630c94d27d69e2a2d0219ee4d626a7adf8bb7bcd31726e098'),
+        (9, 9, 3, 7, '9510a8baf83ce499f9790770c93bad20eeb9eca409b928324e225080b708bc31'),
+        (5, 3, 3, 8, 'aed184345b181368313957ac0f37299a6f21dbcc392784ced265fde06f953899'),
+        (1, 1, 1, 9, '67853ea2543ddf539279d7b78c09224b6c11b0f63a79125b0ea313097ee5e5cd'),
+        (64, 8, 3, 10, '486541e75983c639859d8c8190c82989c19ee52075e8bb7116897812def7c461'),
+    )
+
+    #: Dégradé 4x4 passé par ``ZYWRLE_ANALYZE`` (C, niveau 1) puis ``ZYWRLE_SYNTHESIZE``.
+    COEFFS_4X4 = bytes.fromhex(
+        '000000000000000000000000000000000000000000000000'
+        '000000000000000000000000e7bc5a50da5aabfc280a1df6'
+    )
+    PIXELS_4X4 = bytes.fromhex(
+        '001cd0001cd0a505b9a505b9001cd0001cd0a505b9a505b9'
+        '0093e30093e3b19d89b19d890093e30093e3b19d89b19d89'
+    )
+
     @staticmethod
-    def _zrle_rect_stream(encoding_value: int, tile: bytes) -> bytes:
+    def _zrle_rect_stream(
+        encoding_value: int, tile: bytes, width: int = 4, height: int = 3
+    ) -> bytes:
         compressor = zlib.compressobj()
         compressed = compressor.compress(tile) + compressor.flush()
-        header = (0).to_bytes(2, 'big') * 2 + (4).to_bytes(2, 'big') + (3).to_bytes(2, 'big')
+        header = (0).to_bytes(2, 'big') * 2 + width.to_bytes(2, 'big') + height.to_bytes(2, 'big')
         return (
             header
             + encoding_value.to_bytes(4, 'big', signed=True)
             + len(compressed).to_bytes(4, 'big')
             + compressed
         )
+
+    async def _decoder(self, encoding_value, tile, width, height, qualite):
+        video = make_video(width=width, height=height, decompress=zlib.decompressobj())
+        video.jpeg_quality = qualite
+        video.reader = _reader_from(self._zrle_rect_stream(encoding_value, tile, width, height))
+        await video.read()
+        return video.data[0:height, 0:width, :3]
+
+    def test_synthese_identique_au_code_c_de_reference(self):
+        for largeur, hauteur, niveau, graine, empreinte in self.VECTEURS_C:
+            entree = _lcg_octets(largeur * hauteur * 3, graine).reshape(hauteur, largeur, 3)
+            sortie = _zywrle_synthesize(entree, niveau)
+            self.assertEqual(sortie.shape, entree.shape)
+            self.assertEqual(
+                hashlib.sha256(np.ascontiguousarray(sortie).tobytes()).hexdigest(),
+                empreinte,
+                f'{largeur}x{hauteur} niveau {niveau}',
+            )
+
+    def test_synthese_tuile_trop_petite_inchangee(self):
+        entree = _lcg_octets(3 * 7 * 3, 11).reshape(3, 7, 3)
+        self.assertIs(_zywrle_synthesize(entree, 2), entree)
+        self.assertIs(_zywrle_synthesize(entree, 0), entree)
+
+    async def test_tuile_zywrle_imbriquee_raw(self):
+        tile = bytes([0, 0]) + self.COEFFS_4X4  # ZYWRLE (0) + tuile imbriquée Raw (0)
+        image = await self._decoder(Enc.ZYWRLE.value, tile, 4, 4, 7)  # qualité 7 -> niveau 1
+        self.assertEqual(image.tobytes(), self.PIXELS_4X4)
+
+    async def test_tuile_zywrle_imbriquee_unie_et_palette(self):
+        coeff = bytes([5, 250, 7])
+        attendu = _zywrle_synthesize(
+            np.ndarray((1, 1, 3), 'B', coeff * 1).repeat(8, 0).repeat(8, 1), 3
+        )
+        image = await self._decoder(Enc.ZYWRLE.value, bytes([0, 1]) + coeff, 8, 8, 0)
+        self.assertTrue((image == attendu).all())
+        # Palette de 2 couleurs (subencoding 2) : 1 bit par pixel, lignes de 8 pixels.
+        palette = bytes([1, 2, 3, 200, 100, 50])
+        bits = bytes([0b10101010, 0b01010101] * 4)
+        coeffs = np.array(
+            [[[1, 2, 3], [200, 100, 50]][((b >> (7 - k)) & 1)] for b in bits for k in range(8)], 'B'
+        ).reshape(8, 8, 3)
+        image = await self._decoder(Enc.ZYWRLE.value, bytes([0, 2]) + palette + bits, 8, 8, 4)
+        self.assertTrue((image == _zywrle_synthesize(coeffs, 2)).all())
+        # RLE simple (subencoding 128) : une couleur, longueur 64 codée 63.
+        image = await self._decoder(
+            Enc.ZYWRLE.value, bytes([0, 128]) + coeff + bytes([63]), 8, 8, 0
+        )
+        self.assertTrue((image == attendu).all())
+
+    async def test_niveau_deduit_de_la_qualite(self):
+        coeffs = _lcg_octets(8 * 8 * 3, 21).reshape(8, 8, 3)
+        tile = bytes([0, 0]) + coeffs.tobytes()
+        vus = set()
+        for qualite in range(9):
+            image = await self._decoder(Enc.ZYWRLE.value, tile, 8, 8, qualite)
+            attendu = _zywrle_synthesize(coeffs, 3 - qualite // 3)
+            self.assertTrue((image == attendu).all(), f'qualité {qualite}')
+            vus.add(image.tobytes())
+        self.assertEqual(len(vus), 3)
+
+    async def test_tuile_0_reste_du_raw_sans_ondelettes(self):
+        coeffs = _lcg_octets(8 * 8 * 3, 31)
+        tile = bytes([0]) + coeffs.tobytes()
+        for encoding_value, qualite in (
+            (Enc.ZRLE.value, 0),
+            (Enc.ZYWRLE.value, None),
+            (Enc.ZYWRLE.value, 9),
+        ):
+            image = await self._decoder(encoding_value, tile, 8, 8, qualite)
+            self.assertEqual(image.tobytes(), coeffs.tobytes(), (encoding_value, qualite))
 
     async def test_zywrle_decodes_like_zrle_for_a_standard_raw_tile(self):
         pixel = bytes([11, 22, 33])
@@ -207,14 +317,15 @@ class ZywrleTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_reserved_subencoding_range_raises_valueerror(self):
-        # subencoding=28 : exactement la valeur vue en conditions réelles
-        # contre QEMU 8.2.2 (-vnc :N,lossy=on, jpeg_quality<9) une fois son
-        # vrai chemin ZYWRLE engagé -- voir session-11.
-        tile = bytes([28])
-        video = make_video(width=4, height=3, decompress=zlib.decompressobj())
-        video.reader = _reader_from(self._zrle_rect_stream(Enc.ZYWRLE.value, tile))
-        with self.assertRaises(ValueError):
-            await video.read()
+        # subencoding=28 : la valeur vue le 2026-09-09 contre QEMU 8.2.2, qui était en fait
+        # une désynchronisation (tuile imbriquée lue comme du Raw). Toujours refusée, que
+        # ce soit au premier niveau ou dans une tuile imbriquée.
+        for tile, qualite in ((bytes([28]), None), (bytes([0, 28]), 0)):
+            video = make_video(width=4, height=3, decompress=zlib.decompressobj())
+            video.jpeg_quality = qualite
+            video.reader = _reader_from(self._zrle_rect_stream(Enc.ZYWRLE.value, tile))
+            with self.assertRaises(ValueError):
+                await video.read()
 
     def test_default_encodings_excludes_zywrle(self):
         self.assertNotIn(Enc.ZYWRLE, list(Enc.default()))
