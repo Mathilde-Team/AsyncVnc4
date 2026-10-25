@@ -302,9 +302,14 @@ d'audit » et « Confirmation avant commande xvp destructive » ci-dessus.
   testée contre un vrai serveur qui initie la connexion, `x11vnc
   -connect_or_exit` (libvncserver) : RFB 3.8 et 3.3, sans mot de passe et
   avec VNC Authentication, mauvais mot de passe rejeté
-  (`test_live_x11vnc.py`, job CI « Serveur réel »). Reste non vérifié : la
-  traversée d'un vrai NAT/pare-feu, le sandbox et les runners ne testant
-  qu'en loopback.
+  (`test_live_x11vnc.py`, job CI « Serveur réel »). **2026-10-24** : aussi
+  testée contre TigerVNC Xvnc (`vncconfig -connect`, `test_live_xvnc.py`) et
+  à travers un NAT + pare-feu à états réel en espaces de noms réseau
+  (`scripts/scenario_listen_nat.sh` : adresse traduite vue par `listen()`,
+  serveur injoignable en direct, capture correcte). Deux bugs corrigés :
+  TPIXEL Tight en `bgra`, capture bloquée avec TigerVNC. Reste non vérifié :
+  une vraie box Internet (procédure dans
+  `docs/sessions/session-26-2026-10-24.md`).
 - ~~Repli de version de protocole : test réel contre un authentique
   serveur 3.3~~ ✅ **2026-10-10 (issue #28)** — x11vnc 0.9.17
   (libvncserver) avec `-rfbversion 3.3` / `3.7` envoie réellement

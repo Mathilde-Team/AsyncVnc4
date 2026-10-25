@@ -2362,13 +2362,31 @@ class Video:
         )
         return (x, y, width, height)
 
-    def refresh(self, x: int = 0, y: int = 0, width: int | None = None, height: int | None = None):
+    def refresh(
+        self,
+        x: int = 0,
+        y: int = 0,
+        width: int | None = None,
+        height: int | None = None,
+        incremental: bool | None = None,
+    ):
         """
         Sends a video buffer update request to the server.
+
+        ``incremental`` defaults to "a buffer already exists"; screenshot() forces
+        True when it re-requests an area left incomplete (see Client.screenshot()).
         """
 
-        logger.trace('Video.refresh() appelée | x={} y={} width={} height={}', x, y, width, height)
-        incremental = self.data is not None
+        logger.trace(
+            'Video.refresh() appelée | x={} y={} width={} height={} incremental={}',
+            x,
+            y,
+            width,
+            height,
+            incremental,
+        )
+        if incremental is None:
+            incremental = self.data is not None
 
         (x, y, width, height) = self.get_rect(x, y, width, height)
 
@@ -2586,6 +2604,25 @@ class Video:
         )
         logger.trace('Video.process_copy() terminée')
 
+    def _tpixel_vers_mode(self, block: np.ndarray) -> np.ndarray:
+        """
+        Reorders Tight TPIXEL data (always red, green, blue -- rfbproto.rst § Tight
+        Encoding: "the first byte is the red component, the second byte is the green
+        component, and the third byte is the blue component") into the byte order of the
+        negotiated pixel format, which _update_rect() expects.
+
+        Only 'bgra' and 'abgr' need a swap. 'bgra' is what TigerVNC Xvnc and x11vnc
+        propose by default (red_shift=16, little-endian): without this, every Tight
+        rectangle came out with red and blue swapped (found 2026-10-24 against a real
+        Xvnc, issue #27). CPIXEL (ZRLE/TRLE) is different: it is a slice of the pixel in
+        its own byte order, so it needs no reordering.
+        """
+        logger.trace('Video._tpixel_vers_mode() appelée | mode={} shape={}', self.mode, block.shape)
+        if self.mode in ('bgra', 'abgr'):
+            block = block[:, :, ::-1]
+        logger.trace('Video._tpixel_vers_mode() retourne')
+        return block
+
     async def process_tight(self, _reader, x, y, width, height):
         """
         Decodes a Tight or TightPng-encoded rectangle (BasicCompression, FillCompression,
@@ -2606,7 +2643,11 @@ class Video:
                 pixel = await _reader.readexactly(3)
                 block = pixel * (width * height)
                 self._update_rect(
-                    x, x + width, y, y + height, np.ndarray((height, width, 3), 'B', block)
+                    x,
+                    x + width,
+                    y,
+                    y + height,
+                    self._tpixel_vers_mode(np.ndarray((height, width, 3), 'B', block)),
                 )
                 logger.trace('Video.process_tight() retourne')
                 return
@@ -2615,7 +2656,7 @@ class Video:
                 _check_alloc_size(length, 'Tight (JPEG/PNG)')
                 image_data = await _reader.readexactly(length)
                 block = _tight_decode_image(image_data, width, height)
-                self._update_rect(x, x + width, y, y + height, block)
+                self._update_rect(x, x + width, y, y + height, self._tpixel_vers_mode(block))
                 logger.trace('Video.process_tight() retourne')
                 return
             _erreur = ValueError(f'Invalid Tight compression-control byte: {ctl:#x}')
@@ -2654,7 +2695,13 @@ class Video:
         else:
             block = raw
 
-        self._update_rect(x, x + width, y, y + height, np.ndarray((height, width, 3), 'B', block))
+        self._update_rect(
+            x,
+            x + width,
+            y,
+            y + height,
+            self._tpixel_vers_mode(np.ndarray((height, width, 3), 'B', block)),
+        )
         await sleep(0)
         logger.trace('Video.process_tight() terminée')
 
@@ -4428,6 +4475,18 @@ class Client:
     ):
         """
         Takes a screenshot and returns a 3D RGBA array.
+
+        Each FramebufferUpdate answers exactly one FramebufferUpdateRequest
+        (rfbproto.rst § FramebufferUpdate), so when an update leaves the area
+        incomplete a new *incremental* request is sent. TigerVNC Xvnc
+        (``VNCSConnectionST::framebufferUpdateRequest``) answers every
+        non-incremental request of a client that advertised ExtendedDesktopSize with
+        an update holding only that pseudo-rectangle, marks the area as changed and
+        sends the pixels on the next incremental request -- as its own viewer does.
+        Without the new request screenshot() waited forever, and a non-incremental
+        one would loop on desktop-size-only updates (both found 2026-10-24 against a
+        real Xvnc, issue #27). The area never received is still "changed" on the
+        server side, so an incremental request does bring it.
         """
 
         logger.trace(
@@ -4437,10 +4496,13 @@ class Client:
         self.video.refresh(x, y, width, height)
         while True:
             update_type = await self.read()
-            if update_type is UpdateType.VIDEO and self.video.is_complete(x, y, width, height):
-                _resultat = self.video.as_rgba(x, y, width, height)
-                logger.trace('Client.screenshot() retourne | tableau {}', _resultat.shape)
-                return _resultat
+            if update_type is UpdateType.VIDEO:
+                if self.video.is_complete(x, y, width, height):
+                    _resultat = self.video.as_rgba(x, y, width, height)
+                    logger.trace('Client.screenshot() retourne | tableau {}', _resultat.shape)
+                    return _resultat
+                logger.trace('Client.screenshot() | zone incomplète, nouvelle demande')
+                self.video.refresh(x, y, width, height, incremental=True)
         logger.trace('Client.screenshot() terminée')
 
 

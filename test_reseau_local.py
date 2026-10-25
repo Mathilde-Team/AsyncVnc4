@@ -163,8 +163,51 @@ class ServeurRfb:
         if self.pixels is not None:
             writer.write(_mise_a_jour_raw(0, 0, self.pixels))
             await writer.drain()
-        # Garde la connexion ouverte jusqu'à ce que le client la ferme.
+        await self.apres_poignee_de_main(reader, writer)
+
+    async def apres_poignee_de_main(self, reader: asyncio.StreamReader, writer) -> None:
+        """Garde la connexion ouverte jusqu'à ce que le client la ferme."""
         await reader.read()
+
+
+class ServeurFaconTigerVnc(ServeurRfb):
+    """
+    Imite TigerVNC Xvnc (``VNCSConnectionST::framebufferUpdateRequest``) : toute
+    demande NON incrémentale reçoit une mise à jour ne contenant que le
+    pseudo-rectangle ExtendedDesktopSize ; les pixels ne partent qu'à la demande
+    incrémentale suivante (issue #27).
+    """
+
+    def __init__(self, pixels: np.ndarray) -> None:
+        super().__init__()
+        self.image = pixels
+        self.demandes: list[int] = []
+
+    @staticmethod
+    def _taille_seule() -> bytes:
+        ecran = (0).to_bytes(4, 'big') + (0).to_bytes(4, 'big') + (4).to_bytes(2, 'big')
+        ecran += (3).to_bytes(2, 'big') + (0).to_bytes(4, 'big')
+        return (
+            b'\x00\x00'
+            + (1).to_bytes(2, 'big')
+            + (0).to_bytes(4, 'big')
+            + (4).to_bytes(2, 'big')
+            + (3).to_bytes(2, 'big')
+            + asyncvnc2.Enc.EXTENDED_DESKTOP_SIZE.value.to_bytes(4, 'big', signed=True)
+            + b'\x01\x00\x00\x00'
+            + ecran
+        )
+
+    async def apres_poignee_de_main(self, reader: asyncio.StreamReader, writer) -> None:
+        while True:
+            message = await reader.readexactly(10)
+            assert message[0] == 3, message  # FramebufferUpdateRequest
+            self.demandes.append(message[1])
+            if message[1]:
+                writer.write(_mise_a_jour_raw(0, 0, self.image))
+            else:
+                writer.write(self._taille_seule())
+            await writer.drain()
 
 
 @contextlib.asynccontextmanager
@@ -213,6 +256,17 @@ class ConnexionTcpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(scenario.set_pixel_format)
         # Liste par défaut annoncée telle quelle (Raw, toujours supporté, n'a pas à y figurer).
         self.assertEqual(scenario.encodages, [e.value for e in asyncvnc2.EncList(None)])
+
+    async def test_capture_redemande_en_incremental_facon_tigervnc(self):
+        # Avant le correctif, screenshot() attendait indéfiniment après la mise à
+        # jour « taille seule » ; une redemande non incrémentale bouclerait aussi.
+        pixels = _image()
+        scenario = ServeurFaconTigerVnc(pixels)
+        async with serveur_local(scenario) as port, asyncvnc2.connect('127.0.0.1', port) as client:
+            image = await asyncio.wait_for(client.screenshot(), 5)
+            np.testing.assert_array_equal(image, pixels)
+            self.assertEqual(client.video.screens[0].width, 4)
+        self.assertEqual(scenario.demandes, [0, 1])
 
     async def test_qualite_jpeg_et_compression_annoncees(self):
         scenario = ServeurRfb()
