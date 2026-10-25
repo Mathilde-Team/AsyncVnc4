@@ -1,0 +1,29 @@
+# Retire chaque heure les assignés des issues ouvertes sans activité de leur
+# part depuis 24 h (commentaire, commit, PR…). Logique commune dans
+# Mathilde-Team/.github (workflow réutilisable desassignation-inactifs.yml,
+# SOCLE.md §9). Label `garder-assignation` pour exempter une issue.
+name: Désassignation des issues inactives
+
+"on":
+  schedule:
+    - cron: "34 * * * *"
+  workflow_dispatch:
+    inputs:
+      simulation:
+        description: N'écrit rien, affiche seulement les décisions
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: desassignation
+  cancel-in-progress: false
+
+jobs:
+  desassigner:
+    uses: Mathilde-Team/.github/.github/workflows/desassignation-inactifs.yml@main
+    with:
+      simulation: ${{ github.event_name == 'workflow_dispatch' && inputs.simulation }}

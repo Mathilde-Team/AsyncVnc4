@@ -92,8 +92,8 @@ class Enc(Enum):
     Supported encodings
 
     Default priority order is TIGHT, TIGHT_PNG, ZRLE, TRLE, ZLIB, HEXTILE, COPY, RAW.
-    ZYWRLE (17) is a supported member but deliberately NOT in this default
-    list -- see Enc.ZYWRLE and Enc.default() docstrings.
+    ZYWRLE (17) is a supported (lossy) member but deliberately NOT in this
+    default list -- see Enc.ZYWRLE and Enc.default() docstrings.
 
     The remaining members are pseudo-encodings: they never "win" a rectangle
     like the ones above, they either shape the framebuffer/cursor state
@@ -111,33 +111,22 @@ class Enc(Enum):
     #: ZRLE encoding.
     ZRLE = 16
 
-    #: ZYWRLE encoding (17). On the wire this is the ZRLE format (message-type
-    #: 16 sub-stream shape -- 4-byte zlib length then TRLE-style tiles through
-    #: the same zlib context): the "ZYWRLE" part is a server-side-only lossy
-    #: wavelet preprocessing step applied to pixel data *before* the ordinary
-    #: ZRLE/TRLE tile encoder runs (Hitachi's algorithm, see QEMU's
-    #: `ui/vnc-enc-zywrle-template.c`). The original hypothesis here was that
-    #: this meant no client-side decode changes were needed at all -- **real
-    #: testing 2026-09-09 against a real QEMU 8.2.2 server disproves that**:
-    #: once QEMU's lossy wavelet path actually engages (`-vnc :N,lossy=on`
-    #: plus a jpeg_quality < 9), it sends tile subencoding byte values in the
-    #: 17-126 range, which rfbproto.rst/RFC 6143 both reserve as "unused" (no
-    #: packed-palette bit-width is defined above size 16) -- this fork's
-    #: TRLE/ZRLE decoder correctly raises ValueError on that range rather
-    #: than guess at an undocumented tile format. Two candidate guesses at
-    #: the real format (palette + 1-byte-per-pixel indices; a couple of
-    #: bit-packing width variants) were tried against the live server and
-    #: neither produced a coherent image -- see
-    #: docs/sessions/session-11-2026-09-09.md for the full trace. Net
-    #: result: Enc.ZYWRLE decodes correctly for any *standard* ZRLE-shaped
-    #: rectangle (confirmed: subencodings 0/1/2-16/127/128/130-255 all work,
-    #: same code as Enc.ZRLE -- see Video.read()), but a real QEMU server
-    #: with its lossy path actually engaged WILL eventually send a rectangle
-    #: this fork cannot decode. Deliberately excluded from Enc.default() --
-    #: see Enc.default() -- opt-in only, and only recommended today against
-    #: a server confirmed to encode ZYWRLE within the documented subencoding
-    #: range (untested; TigerVNC/Xvnc 1.13.1 doesn't implement ZYWRLE at
-    #: all, confirmed the same day -- see docs/features-backlog.md).
+    #: ZYWRLE encoding (17), lossy (Hitachi's wavelet extension of ZRLE, issue #22).
+    #: Same envelope as ZRLE (4-byte zlib length, 64x64 tiles through the same zlib
+    #: context); the difference is inside a Raw tile: subencoding byte 0 is followed by
+    #: a *complete nested ZRLE tile* (any subencoding) whose pixels are PLHarr wavelet
+    #: coefficients, rebuilt by _zywrle_synthesize() (byte-for-byte port of
+    #: libvncserver's ZYWRLE_SYNTHESIZE). Sources: QEMU ``ui/vnc-enc-zrle.c.inc``
+    #: (ZRLE_ENCODE_TILE calls itself with ``zywrle_level | 0x80``) and libvncclient
+    #: ``zrle.c``. The wavelet level is never sent: both sides derive it from the JPEG
+    #: quality the client advertised (level = 3 - quality // 3, quality 0-8; QEMU sends
+    #: plain ZRLE (16) when no quality, quality 9 or ``lossy`` is off), so
+    #: Video.create() keeps ``jpeg_quality``. The 17-126 subencodings seen on
+    #: 2026-09-09 against QEMU 8.2.2 were a stream desync (the nested tile read as Raw
+    #: pixels), not a tile format; they are still refused (ValueError). Verified
+    #: 2026-10-24 against a real QEMU 10.2.1 (``lossy=on``, levels 1-3, see
+    #: test_live_qemu_zywrle.py and docs/sessions/session-25-2026-10-24.md). Still
+    #: opt-in (excluded from Enc.default()) because it is lossy.
     ZYWRLE = 17
 
     #: TRLE encoding.
@@ -228,17 +217,10 @@ class Enc(Enum):
         Get a list of supported encodings expect RAW.
 
         Enc.ZYWRLE (17) is deliberately excluded here -- opt-in only via
-        EncList([...]) + Enc.ZYWRLE or EncList() + Enc.ZYWRLE. See the
-        Enc.ZYWRLE docstring: real testing (2026-09-09) against a real
-        QEMU 8.2.2 server found that its ZYWRLE encoder sends tile
-        subencoding byte values in the 17-126 range that rfbproto.rst/RFC
-        6143 both explicitly reserve as "unused" -- this fork's TRLE/ZRLE
-        decoder correctly refuses to decode those (ValueError) rather than
-        guess at an undocumented format and risk silently corrupting the
-        image. Advertising ZYWRLE by default would make a plain ZRLE-only
-        connection to such a server crash the moment the server's lossy
-        heuristics kick in (quality<9 with lossy=on) -- entirely outside
-        the caller's control once negotiated.
+        EncList([...]) + Enc.ZYWRLE or EncList() + Enc.ZYWRLE. Its decoding is
+        complete since issue #22 (verified against a real QEMU 10.2.1), but it is a
+        lossy encoding: a caller that only asks for a jpeg_quality hint (meant for
+        Tight) must not silently get wavelet artefacts in ZRLE rectangles too.
 
         Enc.ULTRA (9) est exclu aussi, pour une autre raison : seul le
         serveur LibVNCServer a été testé, pas UltraVNC (voir Enc.ULTRA).
@@ -404,7 +386,7 @@ async def _sasl_negotiate(
     (`DIGEST-MD5`/`GSSAPI`/`CRAM-MD5`/etc.) nécessiterait une vraie
     bibliothèque SASL (et souvent une infrastructure Kerberos pour
     `GSSAPI`) -- refusé explicitement ici plutôt que deviné, même principe
-    que pour ZYWRLE (subencodings 17-126) et le type de sécurité 18 isolé
+    que pour le type de sécurité 18 isolé
     (voir `docs/features-backlog.md`).
 
     Ni PLAIN ni ANONYMOUS ne négocient de couche de confidentialité/
@@ -1976,6 +1958,95 @@ async def _rle_rle(
     return frame
 
 
+def _zywrle_harr(x0: np.ndarray, x1: np.ndarray) -> tuple:
+    """
+    PLHarr (Piecewise-Linear Haar) inverse step of ZYWRLE, vectorised.
+
+    Exact port of ``Harr()`` in libvncserver ``common/zywrletemplate.c`` (Hitachi,
+    identical to QEMU ``ui/vnc-enc-zywrle.h``): the transform is its own inverse, works
+    on signed bytes held in int32 arrays and wraps its results back to int8 like the C
+    ``(signed char)`` casts. Returns the new (x0, x1) pair.
+    """
+    logger.trace('_zywrle_harr() appelée | shape={}', x0.shape)
+    differ = ((x0 ^ x1) & 0x80) != 0
+    x1d = x1 + x0
+    x0d = np.where(((x1d ^ x1) & 0x80) == 0, x0 - x1d, x0)
+    x0s = x0 - x1
+    x1s = np.where(((x0s ^ x0) & 0x80) == 0, x1 + x0s, x1)
+    nouveau0 = ((np.where(differ, x1d, x1s) + 128) & 0xFF) - 128
+    nouveau1 = ((np.where(differ, x0d, x0s) + 128) & 0xFF) - 128
+    logger.trace('_zywrle_harr() retourne')
+    return nouveau0, nouveau1
+
+
+def _zywrle_synthesize(tile: np.ndarray, level: int) -> np.ndarray:
+    """
+    Rebuilds the pixels of one ZYWRLE tile from its wavelet coefficients.
+
+    ``tile`` is the (h, w, 3) uint8 result of decoding the nested ZRLE tile (CPIXEL
+    bytes 0-2 of a 32bpp little-endian pixel, as negotiated by Video.create()).
+    Byte-for-byte port of ``ZYWRLE_SYNTHESIZE`` (libvncserver
+    ``common/zywrletemplate.c``, the decoder libvncclient uses; QEMU's
+    ``ZYWRLE_ANALYZE`` is its exact counterpart): the coefficients are read in raster
+    order over the whole tile, sub-band by sub-band (Hxy, Hy, Hx for each level, then L
+    for the last one), the inverse PLHarr wavelet runs over the part of the tile aligned
+    on ``2**level`` pixels, then the RCT colour transform turns (V, Y, U) back into
+    bytes (2, 1, 0) = (R, G, B). Pixels outside the aligned part travel unchanged, after
+    the coefficients. Checked byte for byte against the compiled C code -- see
+    ``ZywrleTests`` and ``docs/sessions/session-25-2026-10-24.md``.
+    """
+    logger.trace('_zywrle_synthesize() appelée | shape={} level={}', tile.shape, level)
+    hauteur, largeur = tile.shape[:2]
+    masque = ~((1 << level) - 1)
+    w, h = largeur & masque, hauteur & masque
+    if level <= 0 or w == 0 or h == 0:
+        # Même cas que le « return NULL » du C : tuile plus petite que 2**level, inchangée.
+        logger.trace('_zywrle_synthesize() retourne | tuile inchangée')
+        return tile
+    sequence = np.ascontiguousarray(tile).reshape(-1, 3)
+    coeffs = np.empty((h, w, 3), np.int32)
+    n = 0
+    for lv in range(level):
+        pas = 2 << lv
+        for r in (3, 2, 1, 0) if lv == level - 1 else (3, 2, 1):
+            y0 = pas >> 1 if r & 2 else 0
+            x0 = pas >> 1 if r & 1 else 0
+            nombre = (h // pas) * (w // pas)
+            coeffs[y0::pas, x0::pas] = (
+                sequence[n : n + nombre].view(np.int8).reshape(h // pas, w // pas, 3)
+            )
+            n += nombre
+    hors_grille = sequence[n:]
+    for lv in range(level - 1, -1, -1):
+        p, q = 1 << lv, 2 << lv
+        coeffs[0::q, 0::p], coeffs[p::q, 0::p] = _zywrle_harr(
+            coeffs[0::q, 0::p], coeffs[p::q, 0::p]
+        )
+        coeffs[0::p, 0::q], coeffs[0::p, p::q] = _zywrle_harr(
+            coeffs[0::p, 0::q], coeffs[0::p, p::q]
+        )
+    u = coeffs[..., 0] << 1
+    y = coeffs[..., 1] + 128
+    v = coeffs[..., 2] << 1
+    g = y - ((u + v) >> 2)
+    sortie = np.array(tile, 'B', copy=True)
+    sortie[:h, :w, 0] = np.clip(u + g, 0, 255)
+    sortie[:h, :w, 1] = np.clip(g, 0, 255)
+    sortie[:h, :w, 2] = np.clip(v + g, 0, 255)
+    uw, uh = largeur - w, hauteur - h
+    k = 0
+    if uw:
+        sortie[:h, w:] = hors_grille[k : k + h * uw].reshape(h, uw, 3)
+        k += h * uw
+    if uh:
+        sortie[h:, :w] = hors_grille[k : k + uh * w].reshape(uh, w, 3)
+        k += uh * w
+    if uw and uh:
+        sortie[h:, w:] = hors_grille[k:].reshape(uh, uw, 3)
+    logger.trace('_zywrle_synthesize() retourne | shape={}', sortie.shape)
+    return sortie
+
+
 async def _tight_read_length(reader: StreamReader) -> int:
     """
     Reads a Tight "compact" length (1-3 bytes) and returns it.
@@ -2161,6 +2232,10 @@ class Video:
     #: Allowed encodings list
     encodings: list | None = None
 
+    #: JPEG quality hint (0-9) advertised by Video.create(), None if not sent. Also selects
+    #: the ZYWRLE wavelet level (3 - quality // 3), exactly like QEMU and libvncclient.
+    jpeg_quality: int | None = None
+
     #: Four independent zlib streams used by Tight's BasicCompression.
     tight_streams: list = field(
         default_factory=lambda: [decompressobj() for _ in range(4)], repr=False
@@ -2254,6 +2329,7 @@ class Video:
         decompress = decompressobj()
 
         _resultat = cls(reader, writer, decompress, name, width, height, mode, encodings)
+        _resultat.jpeg_quality = jpeg_quality
         logger.debug('Video.create() retourne | {}x{} mode={}', width, height, mode)
         return _resultat
 
@@ -2423,53 +2499,80 @@ class Video:
         await sleep(0)
         logger.trace('Video.process_raw_indexed() terminée')
 
-    async def process_xrle(self, _reader, x, y, width, height, tile_sz):
+    async def process_xrle(self, _reader, x, y, width, height, tile_sz, zywrle_level=0):
+        """
+        Decodes a TRLE (tile_sz=16) or ZRLE/ZYWRLE (tile_sz=64) rectangle.
+
+        ``zywrle_level`` (1-3) is only non-zero for a ZYWRLE (17) rectangle: a Raw tile
+        (subencoding 0) then carries a complete nested ZRLE tile holding the wavelet
+        coefficients, rebuilt by _zywrle_synthesize() -- see Enc.ZYWRLE.
+        """
         logger.trace(
-            'Video.process_xrle() appelée | x={} y={} width={} height={} tile_sz={}',
+            'Video.process_xrle() appelée | x={} y={} width={} height={} tile_sz={} zywrle_level={}',
             x,
             y,
             width,
             height,
             tile_sz,
+            zywrle_level,
         )
         palette = []
 
         for cx, cy, cw, ch in _tile_gen(tile_sz, tile_sz, x, y, width, height):
-            subencoding = await read_int(_reader, 1)
-            await sleep(0)
-            if subencoding == 0:
-                block = await _reader.readexactly(ch * cw * 3)
-                self._update_rect(cx, cx + cw, cy, cy + ch, np.ndarray((ch, cw, 3), 'B', block))
-            elif subencoding == 1:
-                block = await _reader.readexactly(3)
-                self._update_rect(cx, cx + cw, cy, cy + ch, np.ndarray((1, 1, 3), 'B', block))
-            elif (subencoding <= 16) or (subencoding == 127):
-                block = await _rle_packedbits(_reader, cw, ch, subencoding, palette)
-                self._update_rect(cx, cx + cw, cy, cy + ch, np.ndarray((ch, cw, 3), 'B', block))
-            elif subencoding < 128:
-                # Valeurs 17-126 : "unused" selon rfbproto.rst / RFC 6143 (aucun format de
-                # bit-packing n'est défini au-delà de la taille de palette 16) -- MAIS un vrai
-                # QEMU 8.2.2 (`-vnc :N,lossy=on`) les émet réellement une fois son extension
-                # ZYWRLE engagée (quality<9). Deux hypothèses de format testées en conditions
-                # réelles le 2026-09-09 (palette de `subencoding` couleurs + 1 octet d'index par
-                # pixel ; et quelques variantes de largeur de bit-packing) : aucune ne redonne un
-                # flux cohérent avec le contenu de test connu -- voir
-                # docs/sessions/session-11-2026-09-09.md pour le détail des essais et pourquoi ce
-                # n'est délibérément PAS deviné plus loin ici (le risque est de décoder du faux
-                # silencieusement). On refuse donc explicitement plutôt que de corrompre l'image.
-                _erreur = ValueError(
-                    f'Palette subencoding {subencoding} (plage 17-126, réservée par la RFC) reçue '
-                    '-- probablement du ZYWRLE réel (QEMU) dont le format de tuile exact pour '
-                    "cette plage n'a pas été déterminé avec certitude dans ce fork ; voir "
-                    'Enc.ZYWRLE et docs/features-backlog.md'
-                )
-                logger.debug('Video.process_xrle() lève | {!r}', _erreur)
-                raise _erreur
-            else:
-                block = await _rle_rle(_reader, cw, ch, subencoding, palette)
-                self._update_rect(cx, cx + cw, cy, cy + ch, np.ndarray((ch, cw, 3), 'B', block))
+            block = await self._xrle_tile(_reader, cw, ch, palette, zywrle_level)
+            self._update_rect(cx, cx + cw, cy, cy + ch, block)
             await sleep(0)
         logger.trace('Video.process_xrle() terminée')
+
+    async def _xrle_tile(self, _reader, cw, ch, palette, zywrle_level):
+        """
+        Reads one TRLE/ZRLE tile and returns its pixels, shape (ch, cw, 3) or (1, 1, 3).
+
+        When ``zywrle_level`` is 1-3 (and its 0x80 "nested" flag is not set) a Raw tile
+        is a ZYWRLE tile: subencoding byte 0 followed by a full nested tile (any
+        subencoding) whose pixels are wavelet coefficients. This is what QEMU writes
+        (``ZRLE_ENCODE_TILE`` calling itself with ``zywrle_level | 0x80`` in
+        ``ui/vnc-enc-zrle.c.inc``) and what libvncclient reads (``HandleZRLETile``).
+        """
+        logger.trace(
+            'Video._xrle_tile() appelée | cw={} ch={} zywrle_level={}', cw, ch, zywrle_level
+        )
+        subencoding = await read_int(_reader, 1)
+        await sleep(0)
+        if subencoding == 0:
+            if 0 < zywrle_level < 0x80:
+                coeffs = await self._xrle_tile(_reader, cw, ch, palette, zywrle_level | 0x80)
+                coeffs = np.broadcast_to(coeffs, (ch, cw, 3))
+                tuile = _zywrle_synthesize(coeffs, zywrle_level)
+                logger.trace('Video._xrle_tile() retourne | ZYWRLE niveau {}', zywrle_level)
+                return tuile
+            block = await _reader.readexactly(ch * cw * 3)
+            tuile = np.ndarray((ch, cw, 3), 'B', block)
+        elif subencoding == 1:
+            block = await _reader.readexactly(3)
+            tuile = np.ndarray((1, 1, 3), 'B', block)
+        elif (subencoding <= 16) or (subencoding == 127):
+            block = await _rle_packedbits(_reader, cw, ch, subencoding, palette)
+            tuile = np.ndarray((ch, cw, 3), 'B', block)
+        elif subencoding < 128:
+            # Valeurs 17-126 : "unused" selon rfbproto.rst / RFC 6143 (aucun format de
+            # bit-packing n'est défini au-delà de la taille de palette 16). Ce n'est PAS le
+            # format ZYWRLE : la tuile ZYWRLE est un octet 0 suivi d'une tuile imbriquée
+            # (branche subencoding == 0 ci-dessus). Les 17-126 vus le 2026-09-09 contre QEMU
+            # 8.2.2 venaient d'une désynchronisation du flux (tuile imbriquée lue comme du
+            # Raw) -- voir Enc.ZYWRLE et docs/sessions/session-25-2026-10-24.md. Une telle
+            # valeur reste donc une erreur de flux : on refuse plutôt que de corrompre l'image.
+            _erreur = ValueError(
+                f'Palette subencoding {subencoding} (plage 17-126, réservée par la RFC) reçue '
+                '-- flux ZRLE désynchronisé ou serveur non conforme ; voir Enc.ZYWRLE'
+            )
+            logger.debug('Video._xrle_tile() lève | {!r}', _erreur)
+            raise _erreur
+        else:
+            block = await _rle_rle(_reader, cw, ch, subencoding, palette)
+            tuile = np.ndarray((ch, cw, 3), 'B', block)
+        logger.trace('Video._xrle_tile() retourne | subencoding={}', subencoding)
+        return tuile
 
     async def process_copy(self, _reader, x, y, width, height):
         logger.trace(
@@ -2881,15 +2984,22 @@ class Video:
             await self.process_xrle(self.reader, x, y, width, height, 16)
 
         elif (encoding is Enc.ZRLE) or (encoding is Enc.ZYWRLE):
-            # Format fil identique pour les deux (voir la docstring de Enc.ZYWRLE) tant que le
-            # serveur ne produit que des subencodings standard (0/1/2-16/127/128/130-255) --
-            # confirmé 2026-09-09 contre un vrai QEMU 8.2.2 pour une tuile Raw (subenc=0), MAIS
-            # ce même serveur envoie aussi, une fois son vrai chemin ZYWRLE engagé, des
-            # subencodings 17-126 (réservés par la RFC) que cette fonction refuse explicitement
-            # plus bas (voir le ValueError dédié) plutôt que de deviner un format non documenté.
+            # Même enveloppe pour les deux (longueur zlib 4 octets puis tuiles 64x64). En
+            # ZYWRLE, le niveau d'ondelettes n'est pas transmis : serveur (QEMU) et client
+            # (libvncclient) le déduisent tous deux de la qualité JPEG annoncée par le client
+            # (3 - qualité // 3). Sans qualité annoncée, QEMU n'envoie que du ZRLE (16).
+            zywrle_level = 0
+            if encoding is Enc.ZYWRLE and self.jpeg_quality is not None:
+                zywrle_level = 3 - self.jpeg_quality // 3
             length = await read_int(self.reader, 4)
             await self.process_xrle(
-                StreamZReader(self.reader, self.decompress, length), x, y, width, height, 64
+                StreamZReader(self.reader, self.decompress, length),
+                x,
+                y,
+                width,
+                height,
+                64,
+                zywrle_level,
             )
 
         elif encoding is Enc.HEXTILE:
