@@ -166,6 +166,50 @@ class CoRRETests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((video.data[0, 0, :] == np.frombuffer(bg, 'B')).all())
 
 
+class TightOrdreDesOctetsTests(unittest.IsolatedAsyncioTestCase):
+    """
+    TPIXEL (Tight) vaut toujours rouge, vert, bleu (rfbproto.rst § Tight Encoding),
+    quel que soit le format de pixel ; le tampon, lui, suit l'ordre du format négocié.
+    En 'bgra' (format par défaut de TigerVNC Xvnc et de x11vnc), rouge et bleu
+    sortaient inversés jusqu'au 2026-10-24 (issue #27, trouvé contre un vrai Xvnc).
+    """
+
+    @staticmethod
+    def _rect_tight(largeur: int, hauteur: int, corps: bytes) -> bytes:
+        return (
+            (0).to_bytes(2, 'big') * 2
+            + largeur.to_bytes(2, 'big')
+            + hauteur.to_bytes(2, 'big')
+            + Enc.TIGHT.value.to_bytes(4, 'big', signed=True)
+            + corps
+        )
+
+    async def _decoder(self, mode: str, largeur: int, hauteur: int, corps: bytes):
+        video = make_video(width=largeur, height=hauteur, mode=mode)
+        video.reader = _reader_from(self._rect_tight(largeur, hauteur, corps))
+        await video.read()
+        return video
+
+    async def test_remplissage_dans_chaque_mode(self):
+        for mode in ('rgba', 'bgra', 'argb', 'abgr'):
+            with self.subTest(mode=mode):
+                video = await self._decoder(mode, 2, 2, bytes([0x80, 0x20, 0x80, 0xC0]))
+                rgba = video.as_rgba(0, 0, 2, 2)
+                self.assertEqual(tuple(int(v) for v in rgba[1, 1]), (0x20, 0x80, 0xC0, 255))
+                octets = video.data[0, 0]
+                self.assertEqual(int(octets[mode.index('r')]), 0x20)
+                self.assertEqual(int(octets[mode.index('b')]), 0xC0)
+
+    async def test_compression_de_base_sans_filtre(self):
+        # ctl 0x00 (flux 0, pas de filtre) ; 2x1 pixels = 6 octets < 12 : envoyés tels quels.
+        pixels = bytes([1, 2, 3, 250, 251, 252])
+        for mode in ('rgba', 'bgra'):
+            with self.subTest(mode=mode):
+                video = await self._decoder(mode, 2, 1, bytes([0x00]) + pixels)
+                rgba = video.as_rgba(0, 0, 2, 1)
+                self.assertEqual(rgba[0, :, :3].tobytes(), pixels)
+
+
 def _lcg_octets(n: int, graine: int) -> np.ndarray:
     """Octets pseudo-aléatoires reproductibles (même suite que le générateur des vecteurs C)."""
     x = (np.arange(n, dtype=np.uint64) * np.uint64(2654435761) + np.uint64(graine)) & np.uint64(

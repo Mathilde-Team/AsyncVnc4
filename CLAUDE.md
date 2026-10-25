@@ -96,6 +96,15 @@ testés contre un vrai serveur tiers, x11vnc/libvncserver (`-rfbversion
 CI « Serveur réel (x11vnc) », aucune modification de code. Voir
 `docs/sessions/session-22-2026-10-10.md`.
 
+**2026-10-24** (#27) : `listen()` testé contre TigerVNC Xvnc
+(`vncconfig -connect`) et à travers un NAT + pare-feu réel monté en espaces de
+noms réseau (`scripts/scenario_listen_nat.sh`, manuel, root). Deux bugs
+corrigés au passage : ordre R,G,B des TPIXEL Tight en mode `bgra`/`abgr`, et
+`screenshot()` bloqué avec TigerVNC (réponse `ExtendedDesktopSize` seule à une
+demande non incrémentale). `test_live_xvnc.py` dans le job « Serveur réel ».
+Reste une vraie box Internet, procédure dans
+`docs/sessions/session-26-2026-10-24.md`.
+
 **2026-10-10 (2)** : encodage Ultra (9) implémenté (#24) : décodeur LZO1X
 pur Python `_lzo1x_decompress()`, vérifié contre liblzo2 et contre un vrai
 x11vnc (image identique au Raw). Opt-in, hors `Enc.default()`. Voir
@@ -215,8 +224,8 @@ puis 2026-09-16 deux fois pour MSLogonII et SASL) :
 
 Priorité 🟢 Faible restante : voir la liste complète dans
 `docs/features-backlog.md` § « Prochaines étapes suggérées » (repli de
-version contre un vrai serveur 3.3, `listen()` contre un vrai NAT/
-pare-feu, MSLogon original/Ultra(LZO)/type de sécurité 18 non commencés
+version contre un vrai serveur 3.3, `listen()` contre une vraie box
+Internet (NAT simulé testé le 2026-10-24), MSLogon original/Ultra(LZO)/type de sécurité 18 non commencés
 (aucune source de format documentée indépendamment d'un serveur/
 bibliothèque de référence, même blocage pour les trois) — **MSLogonII
 (113) et SASL (mécanismes PLAIN/ANONYMOUS) implémentés le 2026-09-16**,

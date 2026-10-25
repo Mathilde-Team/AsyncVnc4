@@ -28,10 +28,10 @@ jobs:
         run: uv sync
 
       - name: Lint (ruff check)
-        run: uv run ruff check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_loguru_regles.py scripts/audit_debug_sorties.py
+        run: uv run ruff check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_loguru_regles.py scripts/audit_debug_sorties.py
 
       - name: Formatage (ruff format --check)
-        run: uv run ruff format --check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_loguru_regles.py scripts/audit_debug_sorties.py
+        run: uv run ruff format --check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_loguru_regles.py scripts/audit_debug_sorties.py
 
       - name: Tests et couverture (unittest, seuil lu dans pyproject.toml)
         # Suite documentée dans CLAUDE.md « Commandes de qualité » : aucun
@@ -76,7 +76,7 @@ jobs:
         run: uv run -p 3.9 python3 -m unittest test_asyncvnc2 test_reseau_local test_decodage_video test_loguru_regles -v
 
       - name: Version minimale (vermin)
-        run: uvx vermin --no-tips --eval-annotations -t=3.9- --violations asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_qemu_sasl.py test_live_qemu_zywrle.py test_loguru_regles.py scripts/audit_debug_sorties.py
+        run: uvx vermin --no-tips --eval-annotations -t=3.9- --violations asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_live_qemu_sasl.py test_live_qemu_zywrle.py test_loguru_regles.py scripts/audit_debug_sorties.py
 
   live:
     # Issues #28 et #27 : repli de version et connexion inversée contre un
@@ -126,6 +126,22 @@ jobs:
         env:
           ASYNCVNC_LIVE: "1"
         run: uv run python3 -m unittest test_live_x11vnc -v
+
+      - name: TigerVNC (Xvnc, vncconfig)
+        run: |
+          SUDO=""; if [ "$(id -u)" != "0" ]; then SUDO="sudo"; fi
+          if ! command -v Xvnc >/dev/null || ! command -v vncconfig >/dev/null; then
+            $SUDO apt-get update
+            $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y tigervnc-standalone-server tigervnc-tools
+          fi
+          Xvnc -version 2>&1 | head -n 1
+
+      - name: Tests contre TigerVNC Xvnc
+        # Issue #27 : listen() + vncconfig -connect, et chaque encodage contre
+        # la couleur posée par xsetroot.
+        env:
+          ASYNCVNC_LIVE: "1"
+        run: uv run python3 -m unittest test_live_xvnc -v
 
       - name: QEMU et Cyrus SASL
         run: |
