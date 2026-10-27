@@ -41,7 +41,10 @@ source = ["asyncvnc2"]
 # Mathilde-Team/.github#9). Palier 1 (issue #54) : mesure du job Qualité au
 # 22/10/2026 (51,32 %). Palier 2 (issue #54) : 74,17 % lignes + branches au
 # 24/10/2026 avec test_decodage_video (décodeurs Tight, Hextile, ZlibHex, TRLE,
-# curseurs, ExtendedDesktopSize), arrondi à l'entier inférieur ; à relever à
-# chaque PR de tests. Déclaré ici seulement, lu par `coverage report` dans ci.yml.
-fail_under = 74
+# curseurs, ExtendedDesktopSize), arrondi à l'entier inférieur. Palier 3 (issue
+# #54) : 88,21 % au 27/10/2026 avec les négociations VeNCrypt et RSA-AES (flux
+# simulés, serveur RA2 en mémoire), la montée TLS en boucle locale, EncList,
+# clavier, souris et champs ARD/MSLogonII ; à relever à chaque PR de tests.
+# Déclaré ici seulement, lu par `coverage report` dans ci.yml.
+fail_under = 88
 show_missing = true
