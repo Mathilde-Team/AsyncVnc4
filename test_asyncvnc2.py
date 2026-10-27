@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
+import ssl
 import unittest
 import zlib
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 from loguru import logger
@@ -1104,6 +1107,465 @@ class SaslNegotiateTests(unittest.IsolatedAsyncioTestCase):
         writer = _FakeWriter()
         with self.assertRaises(ValueError):
             await asyncvnc2._sasl_negotiate(reader, writer, None, None)
+
+
+# ---------------------------------------------------------------------------
+# Issue #54, palier 3 : négociations de sécurité VeNCrypt et RSA-AES, par flux
+# simulés (aucun serveur VNC). VeNCrypt : la montée TLS elle-même
+# (_start_tls_client) est doublée, seuls le format des octets échangés et le
+# choix du contexte TLS sont vérifiés. RSA-AES : un vrai serveur RA2 tourne en
+# mémoire (clés RSA et chiffrement AES-EAX réels), écrit d'après le même
+# format que _rsa_aes_negotiate() (rfbproto.rst, CSecurityRSAAES.cxx).
+# ---------------------------------------------------------------------------
+
+
+def _vencrypt_server(subtypes, version=(0, 2), ack=0, tls_ok=1) -> bytes:
+    return (
+        bytes(version)
+        + bytes([ack, len(subtypes)])
+        + b''.join(s.to_bytes(4, 'big') for s in subtypes)
+        + bytes([tls_ok])
+    )
+
+
+class VencryptNegotiateTests(unittest.IsolatedAsyncioTestCase):
+    async def _negocier(self, server_bytes, ssl_context=None, server_hostname=None):
+        reader = _reader_from(server_bytes)
+        writer = _FakeWriter()
+        montee = AsyncMock(return_value=('lecteur TLS', 'écrivain TLS'))
+        with patch.object(asyncvnc2, '_start_tls_client', montee):
+            resultat = await asyncvnc2._vencrypt_negotiate(
+                reader, writer, ssl_context, server_hostname
+            )
+        return resultat, writer, montee
+
+    async def test_tls_none_anonyme_contexte_sans_verification(self):
+        (r, w, choisi), writer, montee = await self._negocier(
+            _vencrypt_server([asyncvnc2._VENCRYPT_TLS_NONE])
+        )
+        self.assertEqual((r, w, choisi), ('lecteur TLS', 'écrivain TLS', 257))
+        self.assertEqual(bytes(writer.sent), bytes([0, 2]) + (257).to_bytes(4, 'big'))
+        contexte = montee.await_args.args[2]
+        self.assertEqual(contexte.verify_mode, ssl.CERT_NONE)
+        self.assertFalse(contexte.check_hostname)
+        self.assertEqual(contexte.maximum_version, ssl.TLSVersion.TLSv1_2)
+
+    async def test_preference_x509_et_contexte_verifiant(self):
+        offerts = [
+            asyncvnc2._VENCRYPT_TLS_NONE,
+            asyncvnc2._VENCRYPT_TLS_PLAIN,
+            asyncvnc2._VENCRYPT_X509_VNC,
+        ]
+        (_, _, choisi), writer, montee = await self._negocier(
+            _vencrypt_server(offerts), server_hostname='vnc.exemple'
+        )
+        self.assertEqual(choisi, asyncvnc2._VENCRYPT_X509_VNC)
+        self.assertEqual(bytes(writer.sent)[2:], (261).to_bytes(4, 'big'))
+        contexte = montee.await_args.args[2]
+        self.assertEqual(contexte.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(contexte.check_hostname)
+        self.assertEqual(montee.await_args.args[3], 'vnc.exemple')
+
+    async def test_ordre_de_preference_complet(self):
+        ordre = [
+            asyncvnc2._VENCRYPT_X509_VNC,
+            asyncvnc2._VENCRYPT_X509_PLAIN,
+            asyncvnc2._VENCRYPT_X509_SASL,
+            asyncvnc2._VENCRYPT_X509_NONE,
+            asyncvnc2._VENCRYPT_TLS_VNC,
+            asyncvnc2._VENCRYPT_TLS_PLAIN,
+            asyncvnc2._VENCRYPT_TLS_SASL,
+            asyncvnc2._VENCRYPT_TLS_NONE,
+        ]
+        for i, attendu in enumerate(ordre):
+            with self.subTest(sous_type=attendu):
+                (_, _, choisi), _, montee = await self._negocier(
+                    _vencrypt_server(list(reversed(ordre[i:])))
+                )
+                self.assertEqual(choisi, attendu)
+                x509 = attendu in ordre[:4]
+                self.assertEqual(
+                    montee.await_args.args[2].verify_mode,
+                    ssl.CERT_REQUIRED if x509 else ssl.CERT_NONE,
+                )
+
+    async def test_contexte_fourni_transmis_tel_quel(self):
+        contexte = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        _, _, montee = await self._negocier(
+            _vencrypt_server([asyncvnc2._VENCRYPT_X509_NONE]), ssl_context=contexte
+        )
+        self.assertIs(montee.await_args.args[2], contexte)
+
+    async def test_refus_et_erreurs(self):
+        cas = {
+            'version majeure': _vencrypt_server([257], version=(1, 2)),
+            'version mineure': _vencrypt_server([257], version=(0, 1)),
+            'version refusée': _vencrypt_server([257], ack=1),
+            'aucun sous-type': _vencrypt_server([]),
+            'sous-type inconnu': _vencrypt_server([1, 2]),
+            'échec TLS serveur': _vencrypt_server([257], tls_ok=0),
+        }
+        for nom, octets in cas.items():
+            with self.subTest(cas=nom), self.assertRaises(ValueError):
+                await self._negocier(octets)
+
+
+class _Tuyau:
+    """Écrivain en mémoire : ce qui est écrit arrive dans le lecteur d'en face."""
+
+    def __init__(self, lecteur_en_face: asyncio.StreamReader):
+        self._en_face = lecteur_en_face
+        self.ferme = False
+        self.attendu = False
+
+    def write(self, data: bytes) -> None:
+        self._en_face.feed_data(bytes(data))
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.ferme = True
+
+    async def wait_closed(self) -> None:
+        self.attendu = True
+
+
+def _rsa_cle_publique_octets(cle, taille: int) -> tuple[bytes, bytes]:
+    nombres = cle.public_key().public_numbers()
+    return nombres.n.to_bytes(taille, 'big'), nombres.e.to_bytes(taille, 'big')
+
+
+async def _serveur_rsa_aes(
+    lecteur,
+    ecrivain,
+    cle_serveur,
+    key_bits,
+    sous_type,
+    *,
+    taille_alea_chiffre=None,
+    alea_serveur=None,
+    hachage_faux=False,
+):
+    """Côté serveur RA2/RA2_256 minimal ; renvoie les identifiants reçus."""
+    from cryptography.hazmat.primitives.asymmetric import padding as rsa_padding
+    from cryptography.hazmat.primitives.asymmetric import rsa as rsa_mod
+
+    h = hashlib.sha1 if key_bits == 128 else hashlib.sha256
+    longueur = cle_serveur.key_size
+    taille = (longueur + 7) // 8
+    n_s, e_s = _rsa_cle_publique_octets(cle_serveur, taille)
+    ecrivain.write(longueur.to_bytes(4, 'big') + n_s + e_s)
+
+    longueur_client = int.from_bytes(await lecteur.readexactly(4), 'big')
+    taille_client = (longueur_client + 7) // 8
+    n_c = await lecteur.readexactly(taille_client)
+    e_c = await lecteur.readexactly(taille_client)
+    cle_client = rsa_mod.RSAPublicNumbers(
+        int.from_bytes(e_c, 'big'), int.from_bytes(n_c, 'big')
+    ).public_key()
+    n = int.from_bytes(await lecteur.readexactly(2), 'big')
+    alea_client = cle_serveur.decrypt(await lecteur.readexactly(n), rsa_padding.PKCS1v15())
+
+    alea = alea_serveur if alea_serveur is not None else bytes(range(key_bits // 8))
+    chiffre = cle_client.encrypt(alea, rsa_padding.PKCS1v15())
+    ecrivain.write((taille_alea_chiffre or len(chiffre)).to_bytes(2, 'big') + chiffre)
+    if taille_alea_chiffre is not None:
+        return None
+
+    cle_vers_serveur = h(alea + alea_client).digest()[: key_bits // 8]
+    cle_vers_client = h(alea_client + alea).digest()[: key_bits // 8]
+    eax_lecteur = asyncvnc2._EAXReader(lecteur, cle_vers_serveur)
+    eax_ecrivain = asyncvnc2._EAXWriter(ecrivain, cle_vers_client)
+
+    blob_serveur = longueur.to_bytes(4, 'big') + n_s + e_s
+    blob_client = longueur_client.to_bytes(4, 'big') + n_c + e_c
+    recu = await eax_lecteur.readexactly(h().digest_size)
+    assert recu == h(blob_client + blob_serveur).digest(), 'hachage du client inattendu'
+    hachage = h(blob_serveur + blob_client).digest()
+    if hachage_faux:
+        hachage = bytes(len(hachage))
+    eax_ecrivain.write(hachage + bytes([sous_type]))
+    if hachage_faux or sous_type not in (1, 2):
+        return None
+
+    longueur_identifiant = (await eax_lecteur.readexactly(1))[0]
+    identifiant = await eax_lecteur.readexactly(longueur_identifiant)
+    longueur_mdp = (await eax_lecteur.readexactly(1))[0]
+    mdp = await eax_lecteur.readexactly(longueur_mdp)
+    # SecurityResult chiffré, comme le ferait le serveur : relu par l'appelant.
+    eax_ecrivain.write((0).to_bytes(4, 'big'))
+    return identifiant, mdp
+
+
+class RsaAesNegotiateTests(unittest.IsolatedAsyncioTestCase):
+    cle_serveur = None
+
+    @classmethod
+    def setUpClass(cls):
+        from cryptography.hazmat.primitives.asymmetric import rsa as rsa_mod
+
+        cls.cle_serveur = rsa_mod.generate_private_key(public_exponent=65537, key_size=1024)
+
+    async def _dialogue(self, key_bits, username, password, sous_type=1, **options):
+        vers_client = asyncio.StreamReader()
+        vers_serveur = asyncio.StreamReader()
+        client_ecrivain = _Tuyau(vers_serveur)
+        serveur_ecrivain = _Tuyau(vers_client)
+        serveur = asyncio.ensure_future(
+            _serveur_rsa_aes(
+                vers_serveur, serveur_ecrivain, self.cle_serveur, key_bits, sous_type, **options
+            )
+        )
+        try:
+            resultat = await asyncio.wait_for(
+                asyncvnc2._rsa_aes_negotiate(
+                    vers_client, client_ecrivain, key_bits, username, password
+                ),
+                timeout=30,
+            )
+            recu = await asyncio.wait_for(serveur, timeout=30)
+            return resultat, recu, client_ecrivain
+        finally:
+            serveur.cancel()
+
+    def _empreinte_attendue(self):
+        taille = 128
+        n, e = _rsa_cle_publique_octets(self.cle_serveur, taille)
+        condensat = hashlib.sha1((1024).to_bytes(4, 'big') + n + e).digest()
+        return '-'.join(f'{b:02x}' for b in condensat[:8])
+
+    async def test_ra2_identifiant_et_mot_de_passe(self):
+        (lecteur, ecrivain, empreinte), recu, brut = await self._dialogue(
+            128, 'utilisatrice', 'mot de passe é', sous_type=asyncvnc2.RSA_AES_SUBTYPE_USERPASS
+        )
+        self.assertEqual(recu, (b'utilisatrice', 'mot de passe é'.encode()))
+        self.assertEqual(empreinte, self._empreinte_attendue())
+        # Le flux rendu est chiffré : le SecurityResult du serveur se relit en clair.
+        self.assertEqual(await lecteur.readexactly(4), bytes(4))
+        ecrivain.close()
+        await ecrivain.wait_closed()
+        self.assertTrue(brut.ferme and brut.attendu)
+
+    async def test_ra2_256_mot_de_passe_seul(self):
+        (_, _, _), recu, _ = await self._dialogue(
+            256, None, 'secret', sous_type=asyncvnc2.RSA_AES_SUBTYPE_PASS
+        )
+        self.assertEqual(recu, (b'', b'secret'))
+
+    async def test_identifiants_manquants_ou_trop_longs(self):
+        cas = {
+            'mot de passe absent': (None, None, asyncvnc2.RSA_AES_SUBTYPE_PASS),
+            'identifiant absent': (None, 'secret', asyncvnc2.RSA_AES_SUBTYPE_USERPASS),
+            'identifiant trop long': ('u' * 256, 'secret', asyncvnc2.RSA_AES_SUBTYPE_USERPASS),
+            'mot de passe trop long': ('u', 'p' * 256, asyncvnc2.RSA_AES_SUBTYPE_USERPASS),
+            'sous-type inconnu': ('u', 'p', 7),
+        }
+        for nom, (identifiant, mdp, sous_type) in cas.items():
+            with self.subTest(cas=nom), self.assertRaises(ValueError):
+                await self._dialogue(128, identifiant, mdp, sous_type=sous_type)
+
+    async def test_hachage_du_serveur_incorrect(self):
+        with self.assertRaisesRegex(ValueError, 'hachage du serveur incorrect'):
+            await self._dialogue(128, 'u', 'p', hachage_faux=True)
+
+    async def test_alea_du_serveur_mal_forme(self):
+        with self.assertRaisesRegex(ValueError, 'encrypted random number'):
+            await self._dialogue(128, 'u', 'p', taille_alea_chiffre=64)
+        with self.assertRaisesRegex(ValueError, 'wrong size after decryption'):
+            await self._dialogue(128, 'u', 'p', alea_serveur=bytes(17))
+
+    async def test_cle_du_serveur_hors_limites(self):
+        for longueur in (512, 9000):
+            with self.subTest(bits=longueur), self.assertRaises(ValueError):
+                await asyncvnc2._rsa_aes_negotiate(
+                    _reader_from(longueur.to_bytes(4, 'big')), _FakeWriter(), 128, 'u', 'p'
+                )
+
+
+# ---------------------------------------------------------------------------
+# Issue #54, palier 3 : petites briques publiques (EncList, clavier, souris,
+# champs ARD/MSLogonII) et montée TLS réelle en boucle locale.
+# ---------------------------------------------------------------------------
+
+
+class EncListTests(unittest.TestCase):
+    def test_constructions(self):
+        self.assertEqual(list(asyncvnc2.EncList()), list(Enc.default()))
+        self.assertEqual(list(asyncvnc2.EncList(Enc.ZLIB)), [Enc.ZLIB])
+        self.assertEqual(
+            list(asyncvnc2.EncList([Enc.ZLIB, Enc.RAW, Enc.ZLIB])), [Enc.ZLIB, Enc.RAW]
+        )
+        for mauvais in (['zlib'], 3):
+            with self.subTest(arg=mauvais), self.assertRaises(TypeError):
+                asyncvnc2.EncList(mauvais)
+
+    def test_ajout_et_retrait(self):
+        base = asyncvnc2.EncList([Enc.RAW, Enc.ZLIB])
+        self.assertEqual(list(base + Enc.TIGHT), [Enc.TIGHT, Enc.RAW, Enc.ZLIB])
+        self.assertEqual(list(base + [Enc.ZLIB]), [Enc.ZLIB, Enc.RAW])
+        self.assertEqual(list(base - Enc.ZLIB), [Enc.RAW])
+        self.assertEqual(list(base - [Enc.RAW, Enc.ZLIB]), [])
+
+
+class ChampsIdentifiantsTests(unittest.TestCase):
+    def test_pack_ard(self):
+        champ = asyncvnc2.pack_ard('é' * 31)
+        self.assertEqual(len(champ), 64)
+        self.assertTrue(champ.startswith('é'.encode() * 31 + b'\x00'))
+        with self.assertRaises(ValueError):
+            asyncvnc2.pack_ard('x' * 64)
+
+    def test_pack_mslogonii(self):
+        champ = asyncvnc2._pack_mslogonii_field('admin', 256, 'Identifiant')
+        self.assertEqual(len(champ), 256)
+        self.assertTrue(champ.startswith(b'admin\x00'))
+        with self.assertRaisesRegex(ValueError, 'Mot de passe MSLogonII trop long'):
+            asyncvnc2._pack_mslogonii_field('p' * 64, 64, 'Mot de passe')
+
+
+class ClavierSourisTests(unittest.TestCase):
+    def test_clavier(self):
+        writer = _FakeWriter()
+        clavier = Keyboard(writer)
+        clavier.press('Control_L', 'c')
+        ctrl = asyncvnc2.key_codes['Control_L'].to_bytes(4, 'big')
+        c = asyncvnc2.key_codes['c'].to_bytes(4, 'big')
+        self.assertEqual(
+            bytes(writer.sent),
+            b'\x04\x01\x00\x00'
+            + ctrl
+            + b'\x04\x01\x00\x00'
+            + c
+            + b'\x04\x00\x00\x00'
+            + c
+            + b'\x04\x00\x00\x00'
+            + ctrl,
+        )
+        writer.sent.clear()
+        clavier.write('ab')
+        a = asyncvnc2.key_codes['a'].to_bytes(4, 'big')
+        b = asyncvnc2.key_codes['b'].to_bytes(4, 'big')
+        self.assertEqual(
+            bytes(writer.sent),
+            b'\x04\x01\x00\x00'
+            + a
+            + b'\x04\x00\x00\x00'
+            + a
+            + b'\x04\x01\x00\x00'
+            + b
+            + b'\x04\x00\x00\x00'
+            + b,
+        )
+
+    def test_souris(self):
+        writer = _FakeWriter()
+        souris = Mouse(writer)
+        souris.move(300, 20)
+
+        def evenement(boutons):
+            return b'\x05' + bytes([boutons]) + (300).to_bytes(2, 'big') + (20).to_bytes(2, 'big')
+
+        self.assertEqual(bytes(writer.sent), evenement(0))
+        for action, bouton in (
+            (souris.click, 0),
+            (souris.middle_click, 1),
+            (souris.right_click, 2),
+            (souris.scroll_up, 3),
+            (souris.scroll_down, 4),
+        ):
+            with self.subTest(action=action.__name__):
+                writer.sent.clear()
+                action()
+                self.assertEqual(bytes(writer.sent), evenement(1 << bouton) + evenement(0))
+        writer.sent.clear()
+        souris.scroll_down(repeat=2)
+        self.assertEqual(bytes(writer.sent), (evenement(16) + evenement(0)) * 2)
+        self.assertEqual(souris.buttons, 0)
+
+
+def _certificat_auto_signe(dossier):
+    """Certificat et clé de test pour 127.0.0.1 (valables une heure)."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    cle = ec.generate_private_key(ec.SECP256R1())
+    nom = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'asyncvnc-test')])
+    maintenant = datetime.datetime.now(datetime.timezone.utc)
+    certificat = (
+        x509.CertificateBuilder()
+        .subject_name(nom)
+        .issuer_name(nom)
+        .public_key(cle.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(maintenant - datetime.timedelta(minutes=1))
+        .not_valid_after(maintenant + datetime.timedelta(hours=1))
+        .sign(cle, hashes.SHA256())
+    )
+    chemin_cert = os.path.join(dossier, 'cert.pem')
+    chemin_cle = os.path.join(dossier, 'cle.pem')
+    with open(chemin_cert, 'wb') as f:
+        f.write(certificat.public_bytes(serialization.Encoding.PEM))
+    with open(chemin_cle, 'wb') as f:
+        f.write(
+            cle.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+    return chemin_cert, chemin_cle
+
+
+class StartTlsClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_montee_tls_en_cours_de_connexion(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as dossier:
+            chemin_cert, chemin_cle = _certificat_auto_signe(dossier)
+            contexte_serveur = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            contexte_serveur.load_cert_chain(chemin_cert, chemin_cle)
+            recu = asyncio.get_running_loop().create_future()
+
+            async def gerer(lecteur, ecrivain):
+                ecrivain.write(b'clair')
+                await ecrivain.drain()
+                boucle = asyncio.get_running_loop()
+                protocole = ecrivain.transport.get_protocol()
+                transport = await boucle.start_tls(
+                    ecrivain.transport, protocole, contexte_serveur, server_side=True
+                )
+                ecrivain_tls = asyncio.StreamWriter(transport, protocole, lecteur, boucle)
+                recu.set_result(await lecteur.readexactly(7))
+                ecrivain_tls.write(b'chiffre')
+                await ecrivain_tls.drain()
+                ecrivain_tls.close()
+
+            serveur = await asyncio.start_server(gerer, '127.0.0.1', 0)
+            port = serveur.sockets[0].getsockname()[1]
+            try:
+                lecteur, ecrivain = await asyncio.open_connection('127.0.0.1', port)
+                self.assertEqual(await lecteur.readexactly(5), b'clair')
+                contexte = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                contexte.load_verify_locations(chemin_cert)
+                contexte.check_hostname = False
+                lecteur_tls, ecrivain_tls = await asyncio.wait_for(
+                    asyncvnc2._start_tls_client(lecteur, ecrivain, contexte, None), timeout=10
+                )
+                self.assertIs(lecteur_tls, lecteur)
+                self.assertIsNotNone(ecrivain_tls.get_extra_info('ssl_object'))
+                ecrivain_tls.write(b'bonjour')
+                await ecrivain_tls.drain()
+                self.assertEqual(await asyncio.wait_for(recu, 10), b'bonjour')
+                self.assertEqual(await lecteur_tls.readexactly(7), b'chiffre')
+                ecrivain_tls.close()
+            finally:
+                serveur.close()
+                await serveur.wait_closed()
 
 
 if __name__ == '__main__':
