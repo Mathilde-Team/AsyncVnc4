@@ -1,0 +1,34 @@
+asyncvnc2 (dépôt Mathilde-Team/AsyncVnc4)
+==========================================
+
+Ce dépôt dérive de deux projets publiés sous la GNU General Public License
+version 3, dont le texte figure dans LICENSE :
+
+- asyncvnc, Copyright (C) 2021-2023 Barney Gale
+  https://github.com/barneygale/asyncvnc
+  (setup.cfg : « license = GPL », fichier LICENSE : GPLv3)
+- asyncvnc2, Copyright (C) 2021-2025 Andrew Shirayev
+  https://github.com/andrews239/asyncvnc2
+  (dérivé d'asyncvnc ; setup.cfg : « license = GPL », fichier LICENSE : GPLv3)
+
+Aucun des deux projets n'indique « ou toute version ultérieure ». Par prudence,
+le code qui en dérive garde la GPL version 3 seule.
+
+Régimes de licence
+------------------
+
+- asyncvnc2.py : code dérivé de l'amont, modifié par Mathilde-Team
+  (patches listés dans docs/reference/patch-history.md).
+  SPDX-License-Identifier: GPL-3.0-only
+- Tout le reste du code (tests, scripts/) : écrit par Mathilde-Team.
+  SPDX-License-Identifier: GPL-3.0-or-later
+
+Chaque fichier de code porte son identifiant SPDX en tête.
+
+Dépendances (non embarquées)
+----------------------------
+
+- numpy : BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0
+- loguru : MIT
+- cryptography : Apache-2.0 OR BSD-3-Clause
+- keysymdef : X11
