@@ -28,10 +28,10 @@ jobs:
         run: uv sync
 
       - name: Lint (ruff check)
-        run: uv run ruff check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_loguru_regles.py scripts/audit_debug_sorties.py
+        run: uv run ruff check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_loguru_regles.py test_licence.py scripts/audit_debug_sorties.py
 
       - name: Formatage (ruff format --check)
-        run: uv run ruff format --check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_loguru_regles.py scripts/audit_debug_sorties.py
+        run: uv run ruff format --check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_loguru_regles.py test_licence.py scripts/audit_debug_sorties.py
 
       - name: Tests et couverture (unittest, seuil lu dans pyproject.toml)
         # Suite documentée dans CLAUDE.md « Commandes de qualité » : aucun
@@ -49,6 +49,9 @@ jobs:
         run: |
           uv run python3 -m unittest test_loguru_regles -v
           uv run python3 scripts/audit_debug_sorties.py
+
+      - name: Licence et en-têtes SPDX (issue #72)
+        run: uv run python3 -m unittest test_licence -v
 
   python39:
     # Issue #35 : Python 3.9 reste pris en charge (python3 système de
@@ -73,10 +76,10 @@ jobs:
           uv sync -p 3.9
 
       - name: Tests (unittest, Python 3.9)
-        run: uv run -p 3.9 python3 -m unittest test_asyncvnc2 test_reseau_local test_decodage_video test_loguru_regles -v
+        run: uv run -p 3.9 python3 -m unittest test_asyncvnc2 test_reseau_local test_decodage_video test_loguru_regles test_licence -v
 
       - name: Version minimale (vermin)
-        run: uvx vermin --no-tips --eval-annotations -t=3.9- --violations asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_live_qemu_sasl.py test_live_qemu_zywrle.py test_loguru_regles.py scripts/audit_debug_sorties.py
+        run: uvx vermin --no-tips --eval-annotations -t=3.9- --violations asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_live_qemu_sasl.py test_live_qemu_zywrle.py test_loguru_regles.py test_licence.py scripts/audit_debug_sorties.py
 
   live:
     # Issues #28 et #27 : repli de version et connexion inversée contre un
