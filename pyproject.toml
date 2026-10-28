@@ -3,6 +3,8 @@ name = "asyncvnc2"
 version = "0.1.0"
 description = "Fork maison d'asyncvnc (client/serveur RFB pur Python, VNC) avec patches xvp, listen(), repli de version, VeNCrypt, WebSockets, Extended Clipboard, RSA-AES"
 readme = "docs/reference/downstream-consumer.md"
+license = "GPL-3.0-only AND GPL-3.0-or-later"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.24",

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """SASL contre un vrai serveur : le VNC intégré de QEMU (issue #32).
 
 QEMU (ui/vnc-auth-sasl.c) ne propose PLAIN que dans le sous-type VeNCrypt

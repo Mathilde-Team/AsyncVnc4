@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 Tests hors ligne des décodeurs de Video (issue #54, palier 2 de couverture).
 
