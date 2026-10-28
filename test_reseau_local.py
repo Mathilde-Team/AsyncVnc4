@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Tests de bout en bout sur une vraie socket locale, sans serveur VNC externe (issue #54).
 
 Un petit serveur RFB asynchrone, écrit ici octet par octet d'après

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 Suite de tests pour asyncvnc2.py, limitée aux formats binaires déjà vérifiés
 octet par octet en session interactive (voir features.md/CLAUDE.md) :

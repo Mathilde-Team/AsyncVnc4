@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Tests contre un vrai serveur TigerVNC : Xvnc et `vncconfig -connect` (issue #27).
 
 `listen()` reçoit une connexion inversée initiée par un vrai Xvnc
