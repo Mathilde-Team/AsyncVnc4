@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Reconnexion inversée (`listen()`) à travers un vrai NAT/pare-feu (issue #27).
 #
 # Topologie (espaces de noms réseau Linux, netfilter réel) :

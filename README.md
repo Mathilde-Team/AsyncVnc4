@@ -63,4 +63,9 @@ Annonce du projet : [Gcm4 #102](https://github.com/MathildeDec/Gcm4/issues/102)
 
 ## Licence
 
-GPL-3.0 — le fichier `LICENSE` est celui de l'original (`asyncvnc` de Barney Gale, dont ce dépôt dérive via `asyncvnc2` d'andrews239). Le relicence en MIT est impossible : l'œuvre dérivée d'un programme GPL-3.0 reste GPL-3.0 (exception assumée dans l'audit du socle, `.github#1`).
+GPL-3.0. Le texte officiel de la GPLv3 se trouve dans `LICENSE` ; `NOTICE` donne l'avis des projets amont et les régimes de licence :
+
+- `asyncvnc2.py` dérive d'[asyncvnc](https://github.com/barneygale/asyncvnc) (Barney Gale) via [asyncvnc2](https://github.com/andrews239/asyncvnc2) (Andrew Shirayev). Ces deux projets sont publiés sous GPLv3 sans « ou toute version ultérieure », donc le fichier garde `GPL-3.0-only` ;
+- le reste du code (tests, `scripts/`) est écrit par l'équipe et publié en `GPL-3.0-or-later`.
+
+Chaque fichier de code porte son en-tête `SPDX-License-Identifier`. `pyproject.toml` déclare `license = "GPL-3.0-only AND GPL-3.0-or-later"`. Une relicence en MIT est impossible, car une œuvre dérivée d'un programme GPL-3.0 reste sous GPL-3.0.

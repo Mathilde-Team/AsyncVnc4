@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Tests contre un vrai serveur VNC tiers : x11vnc (libvncserver).
 
 Issues #28 (repli de version, serveur 3.3 réel) et #27 (connexion inversée

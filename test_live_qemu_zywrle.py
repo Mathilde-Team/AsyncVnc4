@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """ZYWRLE contre un vrai serveur : le VNC intégré de QEMU (issue #22).
 
 QEMU n'envoie de rectangles ZYWRLE (17) que si le client a annoncé une qualité JPEG

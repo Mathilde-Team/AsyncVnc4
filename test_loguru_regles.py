@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Règles loguru vérifiées par AST (SOCLE §8, modèle : Gcm4
 ``tests/test_loguru_regles.py``).
 

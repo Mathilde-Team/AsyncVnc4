@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Audit de la consigne « debug en entrée et à chaque sortie » (SOCLE §8).
 
 Le socle Mathilde-Team (Mathilde-Team/.github#10) demande au moins deux
