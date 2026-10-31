@@ -5,6 +5,12 @@
 name: Release
 
 "on":
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag vX.Y.Z déjà validé et livré dans main
+        required: true
+        type: string
   push:
     tags: ["v*"]
 
@@ -14,14 +20,15 @@ permissions:
 jobs:
   release:
     name: Publication
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '{"group":"maison","labels":["self-hosted","linux"]}') }}
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ inputs.tag || github.ref_name }}
       DEPOT: ${{ github.event.repository.name }}
     steps:
       - name: Checkout du dépôt
         uses: actions/checkout@v7
         with:
+          ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
 
       # python3 du runner maison trop ancien pour tomllib (Python ≥ 3.11).
@@ -40,7 +47,7 @@ jobs:
       - name: Tag porté par main
         run: |
           git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "${GITHUB_SHA}" FETCH_HEAD; then
+          if ! git merge-base --is-ancestor "refs/tags/${TAG}^{commit}" FETCH_HEAD; then
             echo "::error::le commit tagué ${TAG} n'est pas sur main (passer par le relais dev → main)"
             exit 1
           fi
@@ -54,11 +61,13 @@ jobs:
           fi
 
       - name: Archive des sources
-        run: git archive --format=tar.gz --prefix="${DEPOT}-${VERSION}/" -o "${DEPOT}-${VERSION}.tar.gz" "${GITHUB_SHA}"
+        run: git archive --format=tar.gz --prefix="${DEPOT}-${VERSION}/" -o "${DEPOT}-${VERSION}.tar.gz" "refs/tags/${TAG}^{commit}"
 
       - name: Release GitHub
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          tag_name: ${{ env.TAG }}
+          draft: false
           body_path: notes.md
           files: ${{ github.event.repository.name }}-*.tar.gz
           fail_on_unmatched_files: true
