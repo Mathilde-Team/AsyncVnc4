@@ -10,11 +10,14 @@ name: CI
 jobs:
   quality:
     name: Qualité (lint, format, tests)
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '{"group":"maison","labels":["self-hosted","linux"]}') }}
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
 
     steps:
       - name: Checkout du dépôt
         uses: actions/checkout@v7
+
+      - name: Garde-fous de publication sur tag
+        run: python3 tests/test_workflow_release.py
 
       - name: Installation de uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -42,7 +45,7 @@ jobs:
           uv run coverage run -m unittest test_asyncvnc2 test_reseau_local test_decodage_video -v
           uv run coverage report
 
-      - name: Journalisation loguru (issue #55, SOCLE §8)
+      - name: "Journalisation loguru (issue #55, SOCLE §8)"
         # Règles AST (pas de logging stdlib, format {}, pas de secret, except
         # journalisé) + audit « debug en entrée et à chaque sortie » : la
         # référence scripts/audit_debug_sorties.baseline ne peut que baisser.
@@ -50,7 +53,7 @@ jobs:
           uv run python3 -m unittest test_loguru_regles -v
           uv run python3 scripts/audit_debug_sorties.py
 
-      - name: Licence et en-têtes SPDX (issue #72)
+      - name: "Licence et en-têtes SPDX (issue #72)"
         run: uv run python3 -m unittest test_licence -v
 
   python39:
@@ -59,7 +62,7 @@ jobs:
     # garde les annotations `X | None` en chaînes ; vermin vérifie qu'aucune
     # API de la bibliothèque standard postérieure à 3.9 n'est utilisée.
     name: Python 3.9 (tests, vermin)
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '{"group":"maison","labels":["self-hosted","linux"]}') }}
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
 
     steps:
       - name: Checkout du dépôt

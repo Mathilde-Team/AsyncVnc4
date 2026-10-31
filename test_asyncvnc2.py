@@ -23,6 +23,7 @@ import zlib
 from unittest.mock import AsyncMock, patch
 
 import numpy as np
+from cryptography.hazmat.primitives.asymmetric import rsa
 from loguru import logger
 
 import asyncvnc2
@@ -43,10 +44,15 @@ from asyncvnc2 import (
     Keyboard,
     Mouse,
     Screen,
+    StreamZReader,
     UpdateType,
     Video,
     _lzo1x_decompress,
+    _WebSocketWriter,
+    _ws_frame,
+    _ws_pump,
     _zywrle_synthesize,
+    video_definition,
 )
 
 
@@ -1567,6 +1573,589 @@ class StartTlsClientTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 serveur.close()
                 await serveur.wait_closed()
+
+
+# ---------------------------------------------------------------------------
+# Palier 4 (issue #54) : négociations Apple ARD (33) et MSLogonII (113),
+# repli latin-1 de l'authentification VNC, rejets RFB 3.3, messages serveur
+# rares dans Client.read(), WebSocket (trames, pompe, écriture), StreamZReader
+# en fin de flux, encodages vidéo indexés, LAST_RECT et H264 non implémenté.
+# ---------------------------------------------------------------------------
+
+
+def _init_serveur(
+    largeur: int = 4, hauteur: int = 4, mode: bytes | None = None, nom: bytes = b'test'
+) -> bytes:
+    """Corps ServerInit : dimensions, format de pixels, nom de bureau."""
+    if mode is None:
+        mode = video_definition['rgba']
+    return (
+        largeur.to_bytes(2, 'big')
+        + hauteur.to_bytes(2, 'big')
+        + mode
+        + b'\x00\x00\x00'
+        + len(nom).to_bytes(4, 'big')
+        + nom
+    )
+
+
+class _Ecrivain:
+    """Écrivain factifice complet : capture, drain, fermeture, annulation."""
+
+    def __init__(self):
+        self.sent = bytearray()
+        self.ferme = False
+
+    def write(self, donnees: bytes) -> None:
+        self.sent.extend(donnees)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.ferme = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+class RejetsRfb33Tests(unittest.IsolatedAsyncioTestCase):
+    """Client.create() : rejets RFB 3.3 — type 0 (avec raison) et type inconnu."""
+
+    async def test_type_0_avec_raison(self):
+        raison = 'le serveur refuse la connexion'
+        flux = (
+            b'RFB 003.003\n'
+            + (0).to_bytes(4, 'big')
+            + len(raison.encode()).to_bytes(4, 'big')
+            + raison.encode()
+        )
+        with self.assertRaises(ValueError) as contexte:
+            await Client.create(_reader_from(flux), _FakeWriter(), username='u', password='p')
+        self.assertEqual(str(contexte.exception), raison)
+
+    async def test_type_non_gere(self):
+        flux = b'RFB 003.003\n' + (3).to_bytes(4, 'big')
+        with self.assertRaises(ValueError):
+            await Client.create(_reader_from(flux), _FakeWriter(), username='u', password='p')
+
+
+class AuthApple33Tests(unittest.IsolatedAsyncioTestCase):
+    """Négociation Apple ARD (33) de bout en bout, vérifiée par déchiffrement."""
+
+    @staticmethod
+    def _trame_serveur(der: bytes) -> bytes:
+        return (
+            (12 + len(der)).to_bytes(4, 'big')
+            + b'\x01\x00'
+            + len(der).to_bytes(4, 'big')
+            + der
+            + b'\x00'
+        )
+
+    async def test_negociation_complete(self):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import padding as rembourrage
+        from cryptography.hazmat.primitives.ciphers import Cipher
+
+        cle = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        der = cle.public_key().public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        flux = (
+            b'RFB 003.008\n'
+            + b'\x01\x21'
+            + self._trame_serveur(der)
+            + b'\x00\x00\x00\x00'
+            + (0).to_bytes(4, 'big')
+            + _init_serveur()
+        )
+        ecrivain = _FakeWriter()
+        client = await Client.create(
+            _reader_from(flux), ecrivain, username='utilisateur', password='secret'
+        )
+        self.assertEqual(client.video.width, 4)
+
+        # Le serveur déchiffre la réponse du client : clé AES transportée
+        # dans le bloc RSA, champ identifiants en AES-ECB.
+        reponse = ecrivain.sent[27 : 27 + 270]
+        bloc_rsa = reponse[-128:]
+        chiffres = reponse[12:140]
+        cle_aes = cle.decrypt(bytes(bloc_rsa), rembourrage.PKCS1v15())
+        dechiffreur = Cipher(asyncvnc2.algorithms.AES(cle_aes), asyncvnc2.modes.ECB()).decryptor()
+        clair = dechiffreur.update(chiffres) + dechiffreur.finalize()
+        self.assertEqual(clair[:64].split(b'\x00')[0].decode(), 'utilisateur')
+        self.assertEqual(clair[64:128].split(b'\x00')[0].decode(), 'secret')
+
+    async def test_echec_authentification(self):
+        from cryptography.hazmat.primitives import serialization
+
+        cle = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        der = cle.public_key().public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        flux = (
+            b'RFB 003.008\n'
+            + b'\x01\x21'
+            + self._trame_serveur(der)
+            + b'\x00\x00\x00\x00'
+            + (1).to_bytes(4, 'big')
+        )
+        with self.assertRaisesRegex(PermissionError, 'Auth failed'):
+            await Client.create(_reader_from(flux), _FakeWriter(), username='u', password='p')
+
+
+class AuthVncLatin1Tests(unittest.IsolatedAsyncioTestCase):
+    """Authentification VNC (2) : repli latin-1 pour un mot de passe non ASCII."""
+
+    async def test_mot_de_passe_non_ascii(self):
+        from cryptography.hazmat.primitives.ciphers import Cipher
+
+        mot_de_passe = 'césö'
+        challenge = bytes(range(16))
+        flux = b'RFB 003.008\n' + b'\x01\x02' + challenge + (0).to_bytes(4, 'big') + _init_serveur()
+        ecrivain = _FakeWriter()
+        client = await Client.create(_reader_from(flux), ecrivain, password=mot_de_passe)
+        self.assertEqual(client.video.width, 4)
+
+        # Réponse DES recalculée côté serveur : mot de passe latin-1 tronqué
+        # à 8 octets, bits de chaque octet inversés (DES classique VNC).
+        brute = mot_de_passe.encode('latin-1')
+        cle_des = brute[:8].ljust(8, b'\x00')
+        cle_des = bytes(int(bin(n)[:1:-1].ljust(8, '0'), 2) for n in cle_des)
+        chiffreur = Cipher(
+            asyncvnc2.algorithms.TripleDES(cle_des), asyncvnc2.modes.ECB()
+        ).encryptor()
+        attendu = chiffreur.update(challenge) + chiffreur.finalize()
+        self.assertEqual(ecrivain.sent[13:29], attendu)
+
+
+class AuthMsLogonIITests(unittest.IsolatedAsyncioTestCase):
+    """Négociation MSLogonII (113) : Diffie-Hellman 64 bits + TripleDES-CBC."""
+
+    async def test_negociation_complete(self):
+
+        from cryptography.hazmat.primitives.ciphers import Cipher
+
+        generateur, module, prive = 5, 97, 42
+        public_serveur = pow(generateur, prive, module)
+        flux = (
+            b'RFB 003.008\n'
+            + b'\x01\x71'
+            + generateur.to_bytes(8, 'big')
+            + module.to_bytes(8, 'big')
+            + public_serveur.to_bytes(8, 'big')
+            + (0).to_bytes(4, 'big')
+            + _init_serveur()
+        )
+        ecrivain = _FakeWriter()
+        client = await Client.create(
+            _reader_from(flux), ecrivain, username='utilisateur', password='secret'
+        )
+        self.assertEqual(client.video.width, 4)
+
+        charge = ecrivain.sent[13 : 13 + 328]
+        public_client = int.from_bytes(charge[:8], 'big')
+        self.assertTrue(0 <= public_client < module)
+
+        # Le serveur recalcule le secret partagé DH, en dérive la clé DES
+        # (octets inversés bit à bit, comme pour la VNC Auth classique) et
+        # l'utilise aussi comme IV (spécificité MSLogonII, cf. rfbproto.rst).
+        partage = pow(public_client, prive, module).to_bytes(8, 'big')
+        cle_des = bytes(int(bin(n)[:1:-1].ljust(8, '0'), 2) for n in partage)
+        dechiffreur = Cipher(
+            asyncvnc2.algorithms.TripleDES(cle_des), asyncvnc2.modes.CBC(partage)
+        ).decryptor()
+        nom_clair = dechiffreur.update(charge[8 : 8 + 256]) + dechiffreur.finalize()
+        self.assertTrue(nom_clair.startswith(b'utilisateur\x00'))
+        dechiffreur2 = Cipher(
+            asyncvnc2.algorithms.TripleDES(cle_des), asyncvnc2.modes.CBC(partage)
+        ).decryptor()
+        mdp_clair = dechiffreur2.update(charge[8 + 256 :]) + dechiffreur2.finalize()
+        self.assertTrue(mdp_clair.startswith(b'secret\x00'))
+
+    async def test_module_trop_petit_refuse(self):
+        flux = (
+            b'RFB 003.008\n'
+            + b'\x01\x71'
+            + (5).to_bytes(8, 'big')
+            + (1).to_bytes(8, 'big')
+            + (1).to_bytes(8, 'big')
+        )
+        with self.assertRaises(ValueError):
+            await Client.create(_reader_from(flux), _FakeWriter(), username='u', password='p')
+
+
+class MessagesServeurRaresTests(unittest.IsolatedAsyncioTestCase):
+    """Client.read() : messages serveur rares (palette, fence, EOCU, xvp, presse-papiers)."""
+
+    @staticmethod
+    def _flux(apres: bytes) -> bytes:
+        # make_client() construit le Client directement : le lecteur ne
+        # contient que les octets du message serveur à traiter.
+        return apres
+
+    async def test_set_colour_map_entries(self):
+        apres = (
+            bytes([1, 0])
+            + (0).to_bytes(2, 'big')
+            + (2).to_bytes(2, 'big')
+            + (0xFF00).to_bytes(2, 'big')
+            + (0x0000).to_bytes(2, 'big')
+            + (0x0000).to_bytes(2, 'big')
+            + (0x0000).to_bytes(2, 'big')
+            + (0xFF00).to_bytes(2, 'big')
+            + (0x0000).to_bytes(2, 'big')
+        )
+        client = make_client(reader=_reader_from(self._flux(apres)))
+        self.assertEqual(await client.read(), UpdateType.SET_COLOUR_MAP_ENTRIES)
+        self.assertEqual(client.video.palette, {0: (255, 0, 0), 1: (0, 255, 0)})
+
+    async def test_server_fence_repond(self):
+        charge = b'x'
+        apres = (
+            bytes([248, 0, 0, 0]) + (0x80000001).to_bytes(4, 'big') + bytes([len(charge)]) + charge
+        )
+        ecrivain = _FakeWriter()
+        client = make_client(reader=_reader_from(self._flux(apres)), writer=ecrivain)
+        self.assertEqual(await client.read(), UpdateType.SERVER_FENCE)
+        self.assertTrue(
+            ecrivain.sent.endswith(
+                bytes([248, 0, 0, 0])
+                + (0x00000001).to_bytes(4, 'big')
+                + bytes([len(charge)])
+                + charge
+            )
+        )
+
+    async def test_end_of_continuous_updates(self):
+        client = make_client(reader=_reader_from(self._flux(bytes([150, 0, 0, 0]))))
+        client.continuous_updates_active = True
+        self.assertEqual(await client.read(), UpdateType.END_OF_CONTINUOUS_UPDATES)
+        self.assertFalse(client.continuous_updates_active)
+
+    async def test_xvp_init(self):
+        client = make_client(reader=_reader_from(self._flux(bytes([250, 0, 2, 1]))))
+        self.assertEqual(await client.read(), UpdateType.XVP)
+        self.assertTrue(client.xvp_supported)
+        self.assertEqual(client.xvp_version, 2)
+
+    async def test_clipboard_latin1(self):
+        apres = bytes([3, 0, 0, 0]) + (4).to_bytes(4, 'big') + b'caf\xe9'
+        client = make_client(reader=_reader_from(self._flux(apres)))
+        self.assertEqual(await client.read(), UpdateType.CLIPBOARD)
+        self.assertEqual(client.clipboard.text, 'café')
+
+    async def test_video_last_rect_arrete_la_boucle(self):
+        apres = (
+            bytes([0, 0])
+            + (0xFFFF).to_bytes(2, 'big')
+            + (0).to_bytes(2, 'big') * 4
+            + (0xFFFFFF20).to_bytes(4, 'big')
+        )
+        client = make_client(reader=_reader_from(self._flux(apres)))
+        client.video.reader = client.reader
+        self.assertEqual(await client.read(), UpdateType.VIDEO)
+
+
+class EnvoisClientTests(unittest.IsolatedAsyncioTestCase):
+    """send_client_fence() et send_enable_continuous_updates() : octets sur le fil."""
+
+    async def test_client_fence_payload_trop_long(self):
+        client = make_client(writer=_FakeWriter())
+        with self.assertRaisesRegex(ValueError, '64 bytes'):
+            await client.send_client_fence(0, b'x' * 65)
+        ecrivain = _FakeWriter()
+        client = make_client(writer=ecrivain)
+        await client.send_client_fence(1, b'x' * 64)  # limite acceptée
+        self.assertTrue(
+            ecrivain.sent.endswith(
+                bytes([248, 0, 0, 0]) + (1).to_bytes(4, 'big') + bytes([64]) + b'x' * 64
+            )
+        )
+
+    async def test_enable_continuous_updates(self):
+        ecrivain = _FakeWriter()
+        client = make_client(writer=ecrivain)
+        await client.send_enable_continuous_updates(True, 1, 2, 3, 4)
+        self.assertTrue(
+            ecrivain.sent.endswith(
+                bytes([150, 1])
+                + (1).to_bytes(2, 'big')
+                + (2).to_bytes(2, 'big')
+                + (3).to_bytes(2, 'big')
+                + (4).to_bytes(2, 'big')
+            )
+        )
+        self.assertTrue(client.continuous_updates_active)
+        await client.send_enable_continuous_updates(False, 0, 0, 0, 0)
+        self.assertTrue(ecrivain.sent.endswith(bytes([150, 0, 0, 0, 0, 0, 0, 0, 0, 0])))
+        self.assertFalse(client.continuous_updates_active)
+
+
+class WebSocketTests(unittest.IsolatedAsyncioTestCase):
+    """Trames WebSocket (RFC 6455), écriture masquée/non masquée et pompe."""
+
+    def test_trame_courte_masquee(self):
+        trame = _ws_frame(b'abcd')
+        self.assertEqual(trame[0], 0x82)
+        self.assertEqual(trame[1], 0x80 | 4)
+        self.assertEqual(len(trame), 2 + 4 + 4)
+        self.assertEqual(bytes(o ^ trame[2 + i % 4] for i, o in enumerate(trame[6:10])), b'abcd')
+
+    def test_trame_longueur_16_bits(self):
+        charge = b'x' * 200
+        trame = _ws_frame(charge)
+        self.assertEqual(trame[1], 0x80 | 126)
+        self.assertEqual(int.from_bytes(trame[2:4], 'big'), 200)
+        self.assertEqual(len(trame), 4 + 4 + 200)
+
+    def test_trame_longueur_64_bits(self):
+        charge = b'x' * 70000
+        trame = _ws_frame(charge)
+        self.assertEqual(trame[1], 0x80 | 127)
+        self.assertEqual(int.from_bytes(trame[2:10], 'big'), 70000)
+
+    def test_trame_non_masquee_cote_serveur(self):
+        trame = _ws_frame(b'abc', mask=False)
+        self.assertEqual(trame[1], 3)
+        self.assertEqual(trame[2:], b'abc')
+
+    async def test_writer_ecrit_masque_et_ferme(self):
+        brut = _Ecrivain()
+        tache = asyncio.create_task(asyncio.sleep(3600))
+        ecrivain = _WebSocketWriter(brut, pump_task=tache)
+        ecrivain.write(b'r\x00')
+        self.assertEqual(brut.sent[0], 0x82)
+        self.assertEqual(len(brut.sent), 2 + 4 + 2)
+        ecrivain.close()
+        self.assertIn(bytes([0x88]), brut.sent[-6:])
+        await asyncio.sleep(0)
+        self.assertTrue(tache.cancelled())
+
+    async def test_close_tolerant_socket_deja_fermee(self):
+        class BrutCasse:
+            ferme = False
+
+            def write(self, donnees):
+                raise OSError('transport fermé')
+
+            def close(self):
+                self.ferme = True
+
+        brut = BrutCasse()
+        ecrivain = _WebSocketWriter(brut)
+        ecrivain.close()  # ne doit pas lever malgré l'échec d'envoi
+        self.assertTrue(brut.ferme)
+
+    async def test_wait_closed_erreur_tls_benigne_ignoree(self):
+        class BrutTls:
+            async def wait_closed(self):
+                raise ssl.SSLError('TLS APPLICATION_DATA_AFTER_CLOSE_NOTIFY race')
+
+        ecrivain = _WebSocketWriter(BrutTls())
+        await ecrivain.wait_closed()  # course TLS bénigne : aucun relèvement
+
+    async def test_wait_closed_autre_erreur_ssl_relevee(self):
+        class BrutTls:
+            async def wait_closed(self):
+                raise ssl.SSLError('certificate verify failed')
+
+        ecrivain = _WebSocketWriter(BrutTls())
+        with self.assertRaises(ssl.SSLError):
+            await ecrivain.wait_closed()
+
+    async def test_pompe_transmet_et_repond_au_ping(self):
+        brut_reader = _reader_from(
+            _ws_frame(b'donnees', mask=True) + _ws_frame(b'ping', opcode=0x9)
+        )
+        brut_writer = _Ecrivain()
+        ws_reader = asyncio.StreamReader()
+        tache = asyncio.create_task(_ws_pump(brut_reader, brut_writer, ws_reader))
+        self.assertEqual(await ws_reader.readexactly(7), b'donnees')
+        for _ in range(100):
+            if brut_writer.sent:
+                break
+            await asyncio.sleep(0.001)
+        pong = bytes(brut_writer.sent)[-10:]
+        self.assertEqual(pong[0], 0x8A)
+        self.assertEqual(pong[1], 0x80 | 4)
+        self.assertEqual(bytes(o ^ pong[2 + i % 4] for i, o in enumerate(pong[6:10])), b'ping')
+        tache.cancel()  # le flux est à EOF : la pompe se termine, l'annulation est sans effet
+        try:
+            await tache
+        except asyncio.CancelledError:
+            pass
+
+    async def test_pompe_close_et_eof(self):
+        brut_reader = _reader_from(_ws_frame(b'', opcode=0x8))
+        ws_reader = asyncio.StreamReader()
+        await _ws_pump(brut_reader, _Ecrivain(), ws_reader)
+        self.assertTrue(ws_reader.at_eof())
+
+    async def test_pompe_longueurs_etendues_et_opcode_inconnu(self):
+        trame16 = _ws_frame(b'a' * 300)
+        trame64 = _ws_frame(b'b' * 70000)
+        trame_inconnue = _ws_frame(b'z', opcode=0x3)
+        brut_reader = _reader_from(bytes(trame16) + bytes(trame64) + bytes(trame_inconnue))
+        ws_reader = asyncio.StreamReader()
+        tache = asyncio.create_task(_ws_pump(brut_reader, _Ecrivain(), ws_reader))
+        self.assertEqual(await ws_reader.readexactly(300), b'a' * 300)
+        self.assertEqual(await ws_reader.readexactly(70000), b'b' * 70000)
+        for _ in range(1000):
+            if ws_reader.at_eof():
+                break
+            await asyncio.sleep(0.001)
+        self.assertEqual(await ws_reader.read(1), b'')
+        tache.cancel()
+        try:
+            await tache
+        except asyncio.CancelledError:
+            pass
+
+    async def test_pompe_annulation_propagee(self):
+        brut_reader = asyncio.StreamReader()  # aucune donnée, aucun EOF : la pompe bloque
+        ws_reader = asyncio.StreamReader()
+        tache = asyncio.create_task(_ws_pump(brut_reader, _Ecrivain(), ws_reader))
+        for _ in range(100):
+            if brut_reader._waiter is not None:
+                break
+            await asyncio.sleep(0.001)
+        tache.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await tache
+
+    async def test_pompe_fin_de_connexion_signale_eof(self):
+        brut_reader = _reader_from(b'\x82')
+        ws_reader = asyncio.StreamReader()
+        await _ws_pump(brut_reader, _Ecrivain(), ws_reader)  # flux coupé : EOF, pas d'erreur
+        self.assertTrue(ws_reader.at_eof())
+
+
+class StreamZReaderTests(unittest.IsolatedAsyncioTestCase):
+    """StreamZReader : lectures partielles, fin de flux et readexactly."""
+
+    async def test_read_flux_partiel(self):
+        compresseur = zlib.compressobj()
+        donnees = os.urandom(100000)
+        morceau = compresseur.compress(donnees)  # sans flush : fin de flux non consommée
+        self.assertGreater(len(morceau), 10)
+        attendu = zlib.decompressobj().decompress(morceau)
+        self.assertGreater(len(attendu), 10)
+        zreader = StreamZReader(_reader_from(morceau), zlib.decompressobj(), len(morceau) + 100)
+        self.assertEqual(await zreader.read(-1), attendu)
+
+    async def test_read_taille_nulle(self):
+        zreader = StreamZReader(_reader_from(b''), zlib.decompressobj(), 0)
+        self.assertEqual(await zreader.read(0), b'')
+
+    async def test_readexactly_fin_de_flux(self):
+        zreader = StreamZReader(_reader_from(b''), zlib.decompressobj(), 0)
+        with self.assertRaises(asyncio.IncompleteReadError):
+            await zreader.readexactly(5)
+
+
+class VideoPalier4Tests(unittest.IsolatedAsyncioTestCase):
+    """Encodages vidéo : indexé 8 bpp, CopyRect, LAST_RECT, H264, Zlib, bornes."""
+
+    async def test_raw_indexe_avec_palette(self):
+        video = make_video(mode='indexed8', reader=None)
+        video.palette = {0: (255, 0, 0), 1: (0, 255, 0)}
+        rect = (
+            (0).to_bytes(2, 'big')
+            + (0).to_bytes(2, 'big')
+            + (2).to_bytes(2, 'big')
+            + (2).to_bytes(2, 'big')
+            + (0).to_bytes(4, 'big')  # RAW
+        )
+        video.reader = _reader_from(rect + bytes([0, 1, 1, 0]))
+        self.assertFalse(await video.read())
+        self.assertEqual(list(video.data[0, 0]), [255, 0, 0, 255])
+        self.assertEqual(list(video.data[0, 1]), [0, 255, 0, 255])
+        self.assertEqual(list(video.data[1, 0]), [0, 255, 0, 255])
+        self.assertEqual(list(video.data[1, 1]), [255, 0, 0, 255])
+
+    async def test_copy_rect(self):
+        video = make_video()
+        video.data = np.zeros((64, 64, 4), 'B')
+        video.data[0, 0] = (7, 8, 9, 10)
+        rect = (
+            (1).to_bytes(2, 'big')
+            + (1).to_bytes(2, 'big')
+            + (1).to_bytes(2, 'big')
+            + (1).to_bytes(2, 'big')
+            + (1).to_bytes(4, 'big')  # COPY
+            + (0).to_bytes(2, 'big')
+            + (0).to_bytes(2, 'big')
+        )
+        video.reader = _reader_from(rect)
+        self.assertFalse(await video.read())
+        self.assertEqual(list(video.data[1, 1][:3]), [7, 8, 9])
+
+    async def test_zlib_rect(self):
+        video = make_video(decompress=zlib.decompressobj())
+        brut = bytes([9, 8, 7, 6] * 16)
+        rect = (
+            (0).to_bytes(2, 'big')
+            + (0).to_bytes(2, 'big')
+            + (4).to_bytes(2, 'big')
+            + (4).to_bytes(2, 'big')
+            + (6).to_bytes(4, 'big')  # ZLIB
+            + len(zlib.compress(brut)).to_bytes(4, 'big')
+        )
+        video.reader = _reader_from(rect + zlib.compress(brut))
+        self.assertFalse(await video.read())
+        self.assertEqual(list(video.data[0, 0][:3]), [9, 8, 7])
+
+    async def test_last_rect(self):
+        video = make_video()
+        video.reader = _reader_from((0).to_bytes(2, 'big') * 4 + (0xFFFFFF20).to_bytes(4, 'big'))
+        self.assertTrue(await video.read())
+
+    async def test_h264_non_implemente(self):
+        video = make_video()
+        video.reader = _reader_from((0).to_bytes(2, 'big') * 4 + (0x48323634).to_bytes(4, 'big'))
+        with self.assertRaises(NotImplementedError):
+            await video.read()
+
+    async def test_encodage_non_gere(self):
+        video = make_video()
+        video.reader = _reader_from((0).to_bytes(2, 'big') * 4 + (0xFFFFFEC8).to_bytes(4, 'big'))
+        with self.assertRaises(ValueError):
+            await video.read()
+
+    async def test_create_qualite_jpeg_hors_bornes(self):
+        for mauvaise in (-1, 10):
+            with self.subTest(valeur=mauvaise), self.assertRaisesRegex(ValueError, 'jpeg_quality'):
+                await Video.create(
+                    _reader_from(_init_serveur()),
+                    _FakeWriter(),
+                    encodings=[Enc.RAW],
+                    jpeg_quality=mauvaise,
+                )
+
+    async def test_create_niveau_compression_hors_bornes(self):
+        with self.assertRaisesRegex(ValueError, 'compression_level'):
+            await Video.create(
+                _reader_from(_init_serveur()),
+                _FakeWriter(),
+                encodings=[Enc.RAW],
+                compression_level=10,
+            )
+
+    async def test_create_indexe_8bpp_accepte_le_format_du_serveur(self):
+        format_indexe = bytes([8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        ecrivain = _FakeWriter()
+        video = await Video.create(
+            _reader_from(_init_serveur(mode=format_indexe)),
+            ecrivain,
+            encodings=[Enc.RAW],
+            allow_indexed_colour=True,
+        )
+        self.assertEqual(video.mode, 'indexed8')
+        # Pas de SetPixelFormat (0), le premier message est SetEncodings (2)
+        self.assertEqual(ecrivain.sent[0], 1)  # ClientInit partagé
+        self.assertEqual(ecrivain.sent[1], 2)
 
 
 if __name__ == '__main__':

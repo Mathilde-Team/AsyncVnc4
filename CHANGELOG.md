@@ -4,6 +4,10 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Les numéros 
 
 ## [Non publié]
 
+- CI et publication : repli GitHub autorisé, publication manuelle sur un tag
+  déjà livré dans main, vérification d’ascendance et archives du tag exact.
+
+
 ### Ajouté
 - **Licence** (#72) : ajout de `NOTICE`, qui reprend l'avis des projets amont (asyncvnc de Barney Gale, asyncvnc2 d'Andrew Shirayev, tous deux sous GPLv3) et décrit les régimes de licence. `asyncvnc2.py` reste en `GPL-3.0-only`, le reste du code passe en `GPL-3.0-or-later`. En-têtes SPDX, `license` et `license-files` dans `pyproject.toml`, `test_licence.py`. La sauvegarde `asyncvnc2.py.orig`, que rien n'utilisait, est retirée du dépôt.
 - **ZYWRLE complet** (#22) : décodage des tuiles à perte de QEMU. Une tuile Raw d'un rectangle ZYWRLE contient une tuile ZRLE imbriquée (coefficients d'ondelettes), reconstruite par `_zywrle_synthesize()`, port octet par octet de `ZYWRLE_SYNTHESIZE` (libvncserver). Le niveau (3 - qualité // 3) est déduit de `jpeg_quality`, désormais conservé par `Video`. Vérifié contre QEMU 10.2.1 (`test_live_qemu_zywrle.py`, job « Serveur réel »). `Enc.ZYWRLE` reste hors `Enc.default()` (à perte).

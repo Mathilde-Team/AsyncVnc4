@@ -18,7 +18,7 @@ permissions:
 jobs:
   garde-dev-vers-main:
     name: "Garde : PR vers main doit venir de dev"
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '{"group":"maison","labels":["self-hosted","linux"]}') }}
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
     steps:
       - name: Vérifier la branche source
         run: |
