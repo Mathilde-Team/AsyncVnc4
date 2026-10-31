@@ -1,0 +1,21 @@
+# yamllint : règles du socle Mathilde-Team
+extends: default
+rules:
+  line-length: disable          # lambdas C++ et templates Jinja sur une ligne
+  document-start: disable
+  truthy:
+    check-keys: false           # clé « on: » des workflows
+    allowed-values: ['true', 'false', 'yes', 'no']   # ESPHome accepte yes/no (restore_value: yes)
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  indentation:
+    spaces: 2
+    indent-sequences: whatever
+  braces:
+    max-spaces-inside: 1
+  brackets:
+    max-spaces-inside: 1
+ignore: |
+  .venv/
+  node_modules/
