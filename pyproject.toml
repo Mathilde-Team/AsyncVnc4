@@ -46,7 +46,9 @@ source = ["asyncvnc2"]
 # curseurs, ExtendedDesktopSize), arrondi à l'entier inférieur. Palier 3 (issue
 # #54) : 88,21 % au 27/10/2026 avec les négociations VeNCrypt et RSA-AES (flux
 # simulés, serveur RA2 en mémoire), la montée TLS en boucle locale, EncList,
-# clavier, souris et champs ARD/MSLogonII ; à relever à chaque PR de tests.
+# clavier, souris et champs ARD/MSLogonII. Palier 4 (issue #54, PR #77) :
+# 95,35 % au 31/10/2026 (ARD, MSLogonII, WebSocket, messages rares) ; seuil
+# relevé à 95 le 03/11/2026 — objectif de l'équipe atteint, ne plus descendre.
 # Déclaré ici seulement, lu par `coverage report` dans ci.yml.
-fail_under = 88
+fail_under = 95
 show_missing = true
