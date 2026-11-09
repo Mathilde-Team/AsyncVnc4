@@ -31,10 +31,10 @@ jobs:
         run: uv sync
 
       - name: Lint (ruff check)
-        run: uv run ruff check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_loguru_regles.py test_licence.py scripts/audit_debug_sorties.py
+        run: uv run ruff check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_couverture_branches.py test_verifier_couverture.py test_live_x11vnc.py test_live_xvnc.py test_loguru_regles.py test_licence.py scripts/audit_debug_sorties.py scripts/verifier_couverture.py
 
       - name: Formatage (ruff format --check)
-        run: uv run ruff format --check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_loguru_regles.py test_licence.py scripts/audit_debug_sorties.py
+        run: uv run ruff format --check asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_couverture_branches.py test_verifier_couverture.py test_live_x11vnc.py test_live_xvnc.py test_loguru_regles.py test_licence.py scripts/audit_debug_sorties.py scripts/verifier_couverture.py
 
       - name: Tests et couverture (unittest, seuil lu dans pyproject.toml)
         # Suite documentée dans CLAUDE.md « Commandes de qualité » : aucun
@@ -42,8 +42,15 @@ jobs:
         # serveur RFB minimal sur 127.0.0.1). Couverture lignes + branches,
         # seuil bloquant `fail_under` (issue #54).
         run: |
-          uv run coverage run -m unittest test_asyncvnc2 test_reseau_local test_decodage_video -v
-          uv run coverage report
+          make test
+
+      - name: Données de couverture hors ligne
+        uses: actions/upload-artifact@v4
+        with:
+          name: couverture-unitaire
+          path: .coverage.*
+          include-hidden-files: true
+          retention-days: 2
 
       - name: "Journalisation loguru (issue #55, SOCLE §8)"
         # Règles AST (pas de logging stdlib, format {}, pas de secret, except
@@ -79,10 +86,10 @@ jobs:
           uv sync -p 3.9
 
       - name: Tests (unittest, Python 3.9)
-        run: uv run -p 3.9 python3 -m unittest test_asyncvnc2 test_reseau_local test_decodage_video test_loguru_regles test_licence -v
+        run: uv run -p 3.9 python3 -m unittest test_asyncvnc2 test_reseau_local test_decodage_video test_couverture_branches test_verifier_couverture test_loguru_regles test_licence -v
 
       - name: Version minimale (vermin)
-        run: uvx vermin --no-tips --eval-annotations -t=3.9- --violations asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_live_x11vnc.py test_live_xvnc.py test_live_qemu_sasl.py test_live_qemu_zywrle.py test_loguru_regles.py test_licence.py scripts/audit_debug_sorties.py
+        run: uvx vermin --no-tips --eval-annotations -t=3.9- --violations asyncvnc2.py test_asyncvnc2.py test_reseau_local.py test_decodage_video.py test_couverture_branches.py test_verifier_couverture.py test_live_x11vnc.py test_live_xvnc.py test_live_qemu_sasl.py test_live_qemu_zywrle.py test_loguru_regles.py test_licence.py scripts/audit_debug_sorties.py scripts/verifier_couverture.py
 
   live:
     # Issues #28 et #27 : repli de version et connexion inversée contre un
@@ -131,7 +138,7 @@ jobs:
       - name: Tests contre x11vnc
         env:
           ASYNCVNC_LIVE: "1"
-        run: uv run python3 -m unittest test_live_x11vnc -v
+        run: uv run coverage run --parallel-mode -m unittest test_live_x11vnc -v
 
       - name: TigerVNC (Xvnc, vncconfig)
         run: |
@@ -147,7 +154,7 @@ jobs:
         # la couleur posée par xsetroot.
         env:
           ASYNCVNC_LIVE: "1"
-        run: uv run python3 -m unittest test_live_xvnc -v
+        run: uv run coverage run --parallel-mode -m unittest test_live_xvnc -v
 
       - name: QEMU et Cyrus SASL
         run: |
@@ -162,11 +169,42 @@ jobs:
       - name: Tests SASL contre QEMU
         env:
           ASYNCVNC_LIVE: "1"
-        run: uv run python3 -m unittest test_live_qemu_sasl -v
+        run: uv run coverage run --parallel-mode -m unittest test_live_qemu_sasl -v
 
       - name: Tests ZYWRLE contre QEMU
         # Issue #22 : tuiles à perte (lossy=on), niveaux 1 à 3, vérité
         # terrain = screendump du moniteur QEMU.
         env:
           ASYNCVNC_LIVE: "1"
-        run: uv run python3 -m unittest test_live_qemu_zywrle -v
+        run: uv run coverage run --parallel-mode -m unittest test_live_qemu_zywrle -v
+
+      - name: Données de couverture des serveurs réels
+        uses: actions/upload-artifact@v4
+        with:
+          name: couverture-serveurs
+          path: .coverage.*
+          include-hidden-files: true
+          retention-days: 2
+
+  coverage:
+    name: Couverture combinée (lignes et branches)
+    needs: [quality, live]
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    steps:
+      - name: Checkout du dépôt
+        uses: actions/checkout@v7
+      - name: Installation de uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Installation des dépendances
+        run: uv sync
+      - name: Données hors ligne et serveurs réels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: couverture-*
+          path: donnees-couverture
+      - name: Combinaison et contrôles indépendants
+        run: |
+          uv run coverage combine --keep donnees-couverture/couverture-unitaire donnees-couverture/couverture-serveurs
+          uv run coverage report
+          uv run coverage json -o coverage.json
+          uv run python scripts/verifier_couverture.py coverage.json

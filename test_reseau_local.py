@@ -474,6 +474,8 @@ class WebSocketTests(unittest.IsolatedAsyncioTestCase):
                 b'Connection: Upgrade\r\nSec-WebSocket-Accept: faux=\r\n\r\n'
             )
             await writer.drain()
+            writer.close()
+            await writer.wait_closed()
 
         serveur = await asyncio.start_server(accepter, '127.0.0.1', 0)
         try:
@@ -491,6 +493,8 @@ class WebSocketTests(unittest.IsolatedAsyncioTestCase):
                 pass
             writer.write(b'HTTP/1.1 404 Not Found\r\n\r\n')
             await writer.drain()
+            writer.close()
+            await writer.wait_closed()
 
         serveur = await asyncio.start_server(accepter, '127.0.0.1', 0)
         try:
