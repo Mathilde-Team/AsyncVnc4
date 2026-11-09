@@ -255,8 +255,10 @@ suspens.
 ```bash
 uv sync                                          # crée .venv/, installe numpy/loguru/cryptography/keysymdef + ruff (dev)
 uv run python3 -m unittest test_asyncvnc2 -v     # 62 tests
-uv run coverage run -m unittest test_asyncvnc2 test_reseau_local test_decodage_video  # 126 tests (27 sur socket locale, 37 décodeurs hors ligne, issue #54)
-uv run coverage report                           # lignes + branches, échoue sous fail_under (pyproject.toml)
+make test                                        # suite complète, seuil indépendant lignes ET branches (#54)
+uv run coverage report                           # total combiné (ne suffit pas seul)
+uv run coverage json -o coverage.json
+uv run python scripts/verifier_couverture.py coverage.json  # lit fail_under dans pyproject.toml
 uv run python3 -m unittest test_loguru_regles -v # 25 tests, règles de journalisation (issue #55)
 uv run python3 scripts/audit_debug_sorties.py    # 0 fonction non conforme (référence : 0)
 uv run ruff check asyncvnc2.py test_asyncvnc2.py # 0 signalement
