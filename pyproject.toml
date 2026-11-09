@@ -36,7 +36,8 @@ include = ["asyncvnc2.py"]
 [tool.coverage.run]
 # Couverture des branches obligatoire (Mathilde-Team/.github#9).
 branch = true
-source = ["asyncvnc2"]
+relative_files = true
+source = ["asyncvnc2", "scripts.verifier_couverture"]
 
 [tool.coverage.report]
 # Seuil bloquant de l'équipe : 95 % visé (décision du 21/10/2026,
@@ -48,7 +49,9 @@ source = ["asyncvnc2"]
 # simulés, serveur RA2 en mémoire), la montée TLS en boucle locale, EncList,
 # clavier, souris et champs ARD/MSLogonII. Palier 4 (issue #54, PR #77) :
 # 95,35 % au 31/10/2026 (ARD, MSLogonII, WebSocket, messages rares) ; seuil
-# relevé à 95 le 03/11/2026 — objectif de l'équipe atteint, ne plus descendre.
-# Déclaré ici seulement, lu par `coverage report` dans ci.yml.
+# relevé à 95 le 03/11/2026. Le total combiné masquait encore 91,35 % de
+# branches : les cas limites ajoutés pour #54 et verifier_couverture.py
+# imposent désormais le seuil indépendamment aux lignes ET aux branches.
+# Déclaré ici seulement, lu par coverage et le vérificateur dans CI/Makefile.
 fail_under = 95
 show_missing = true

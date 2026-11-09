@@ -52,6 +52,15 @@ class PublicationSurTag(unittest.TestCase):
             self.assertIn(contexte, ci + '\n' + garde)
         self.assertIn('run: python3 tests/test_workflow_release.py', ci)
 
+    def test_transmission_des_deux_sources_de_couverture(self):
+        ci = (self.workflows / 'ci.yml').read_text(encoding='utf-8')
+        self.assertIn('run: cp .coverage .coverage.unitaire', ci)
+        self.assertIn('path: .coverage.unitaire', ci)
+        self.assertEqual(ci.count('if-no-files-found: error'), 2)
+        self.assertIn('needs: [quality, live]', ci)
+        self.assertIn('donnees-couverture/couverture-unitaire', ci)
+        self.assertIn('donnees-couverture/couverture-serveurs', ci)
+
 
 if __name__ == '__main__':
     unittest.main()
