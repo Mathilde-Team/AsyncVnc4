@@ -44,12 +44,16 @@ jobs:
         run: |
           make test
 
+      - name: Préparer les données de couverture hors ligne
+        run: cp .coverage .coverage.unitaire
+
       - name: Données de couverture hors ligne
         uses: actions/upload-artifact@v4
         with:
           name: couverture-unitaire
-          path: .coverage.*
+          path: .coverage.unitaire
           include-hidden-files: true
+          if-no-files-found: error
           retention-days: 2
 
       - name: "Journalisation loguru (issue #55, SOCLE §8)"
@@ -184,6 +188,7 @@ jobs:
           name: couverture-serveurs
           path: .coverage.*
           include-hidden-files: true
+          if-no-files-found: error
           retention-days: 2
 
   coverage:
