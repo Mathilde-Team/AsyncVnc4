@@ -61,8 +61,9 @@ bits doit utiliser les 32 octets complets du SHA-256 (RA2/128 marchait
 du premier coup, RA2_256 échouait immédiatement — signal net). Testé
 pour de vrai contre TigerVNC/Xvnc 1.13.1 pour les deux variantes :
 poignée de main complète, lecture réelle du framebuffer déchiffré,
-écriture clavier chiffrée, rejets corrects. RA2ne/RA2ne_256/RA2r/RA2r_256
-délibérément non implémentés (voir `docs/features-backlog.md`). 6 tests
+écriture clavier chiffrée, rejets corrects. Historiquement, RA2ne/RA2ne_256/RA2r/RA2r_256
+étaient délibérément non implémentés — **2026-11-10 (issue #26) : les
+quatre variantes implémentées** (voir le paragraphe dédié plus bas). 6 tests
 unitaires ajoutés pour les primitives EAX elles-mêmes (fonctions pures,
 contrairement au reste de RSA-AES/VeNCrypt) — voir
 `docs/sessions/session-17-2026-09-15.md`.
@@ -123,6 +124,19 @@ x11vnc (image identique au Raw). Opt-in, hors `Enc.default()`. Voir
 sous-types VeNCrypt X509SASL (263) et TLSSASL (264) ; PLAIN ne fonctionne
 qu'en X509SASL. `test_live_qemu_sasl.py`. Voir
 `docs/sessions/session-24-2026-10-10.md`.
+
+**2026-11-10** (#26) : variantes RSA-AES RA2ne/RA2ne_256 (6/130) et
+RA2r/RA2r_256 (13/133) implémentées. Poignée de main identique à
+RA2/RA2_256 ; seule la fin de `_rsa_aes_negotiate()` change (mots-clés
+`chiffre_session`/`seconde_derivation`) : RA2ne rend les flux bruts après
+la poignée de main, RA2r ajoute la seconde ronde de dérivation (aléas
+échangés sous AES-EAX, nouvelles clés, index de message remis à zéro).
+Vérification par round-trip auto-cohérent uniquement — aucune
+implémentation de référence ouverte ne couvre ces variantes (TigerVNC
+n'implémente pas RA2r du tout) ; pour RA2r, l'ordre d'envoi de l'aléa
+(client le premier, par symétrie avec la ronde 1) reste une hypothèse
+documentée. Ordre de préférence étendu en conséquence. Voir
+`docs/sessions/session-27-2026-11-10.md`.
 
 ## Prochaine feature / prochaine session
 
