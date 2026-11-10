@@ -1253,8 +1253,15 @@ async def _serveur_rsa_aes(
     taille_alea_chiffre=None,
     alea_serveur=None,
     hachage_faux=False,
+    chiffre_session=True,
+    seconde_derivation=False,
 ):
-    """Côté serveur RA2/RA2_256 minimal ; renvoie les identifiants reçus."""
+    """Côté serveur RA2/RA2ne/RA2r minimal ; renvoie les identifiants reçus.
+
+    Avec `seconde_derivation=True` (RA2r), renvoie en plus l'aléa client du
+    second tour et les deux paires de clés de session (tour 1 puis tour 2),
+    pour vérifier que la dérivation a bien eu lieu.
+    """
     from cryptography.hazmat.primitives.asymmetric import padding as rsa_padding
     from cryptography.hazmat.primitives.asymmetric import rsa as rsa_mod
 
@@ -1300,8 +1307,30 @@ async def _serveur_rsa_aes(
     identifiant = await eax_lecteur.readexactly(longueur_identifiant)
     longueur_mdp = (await eax_lecteur.readexactly(1))[0]
     mdp = await eax_lecteur.readexactly(longueur_mdp)
-    # SecurityResult chiffré, comme le ferait le serveur : relu par l'appelant.
-    eax_ecrivain.write((0).to_bytes(4, 'big'))
+
+    cles_tour_1 = (cle_vers_serveur, cle_vers_client)
+    cles_tour_2 = None
+    alea_client_2 = None
+    if seconde_derivation:
+        # RA2r : le client envoie son nouvel aléa, le serveur répond le sien,
+        # tous deux chiffrés en AES-EAX ; nouvelles clés, index remis à zéro.
+        alea_client_2 = await eax_lecteur.readexactly(key_bits // 8)
+        alea_2 = bytes(range(key_bits // 8, key_bits // 4))
+        eax_ecrivain.write(alea_2)
+        cle_vers_serveur_2 = h(alea_2 + alea_client_2).digest()[: key_bits // 8]
+        cle_vers_client_2 = h(alea_client_2 + alea_2).digest()[: key_bits // 8]
+        cles_tour_2 = (cle_vers_serveur_2, cle_vers_client_2)
+        eax_lecteur = asyncvnc2._EAXReader(lecteur, cle_vers_serveur_2)
+        eax_ecrivain = asyncvnc2._EAXWriter(ecrivain, cle_vers_client_2)
+
+    # SecurityResult, chiffré comme le ferait le serveur (relu par l'appelant)
+    # — en clair seulement pour RA2ne, dont c'est précisément la définition.
+    if chiffre_session:
+        eax_ecrivain.write((0).to_bytes(4, 'big'))
+    else:
+        ecrivain.write((0).to_bytes(4, 'big'))
+    if seconde_derivation:
+        return identifiant, mdp, alea_client_2, cles_tour_1, cles_tour_2
     return identifiant, mdp
 
 
@@ -1314,20 +1343,44 @@ class RsaAesNegotiateTests(unittest.IsolatedAsyncioTestCase):
 
         cls.cle_serveur = rsa_mod.generate_private_key(public_exponent=65537, key_size=1024)
 
-    async def _dialogue(self, key_bits, username, password, sous_type=1, **options):
+    async def _dialogue(
+        self,
+        key_bits,
+        username,
+        password,
+        sous_type=1,
+        *,
+        chiffre_session=True,
+        seconde_derivation=False,
+        **options,
+    ):
         vers_client = asyncio.StreamReader()
         vers_serveur = asyncio.StreamReader()
         client_ecrivain = _Tuyau(vers_serveur)
         serveur_ecrivain = _Tuyau(vers_client)
         serveur = asyncio.ensure_future(
             _serveur_rsa_aes(
-                vers_serveur, serveur_ecrivain, self.cle_serveur, key_bits, sous_type, **options
+                vers_serveur,
+                serveur_ecrivain,
+                self.cle_serveur,
+                key_bits,
+                sous_type,
+                chiffre_session=chiffre_session,
+                seconde_derivation=seconde_derivation,
+                **options,
             )
         )
+        self._vers_client = vers_client
         try:
             resultat = await asyncio.wait_for(
                 asyncvnc2._rsa_aes_negotiate(
-                    vers_client, client_ecrivain, key_bits, username, password
+                    vers_client,
+                    client_ecrivain,
+                    key_bits,
+                    username,
+                    password,
+                    chiffre_session=chiffre_session,
+                    seconde_derivation=seconde_derivation,
                 ),
                 timeout=30,
             )
@@ -1359,6 +1412,51 @@ class RsaAesNegotiateTests(unittest.IsolatedAsyncioTestCase):
             256, None, 'secret', sous_type=asyncvnc2.RSA_AES_SUBTYPE_PASS
         )
         self.assertEqual(recu, (b'', b'secret'))
+
+    async def test_ra2ne_rend_les_flux_en_clair(self):
+        # Issue #26, variante RA2ne : la poignée de main est chiffrée, mais
+        # les flux rendus sont bruts et le SecurityResult se lit en clair.
+        (lecteur, ecrivain, _), recu, brut = await self._dialogue(
+            128,
+            'utilisatrice',
+            'secret',
+            chiffre_session=False,
+        )
+        self.assertEqual(recu, (b'utilisatrice', b'secret'))
+        self.assertIs(lecteur, self._vers_client)
+        self.assertIs(ecrivain, brut)
+        self.assertEqual(await lecteur.readexactly(4), bytes(4))
+
+    async def test_ra2ne_256_rend_les_flux_en_clair(self):
+        (_, _, _), recu, _ = await self._dialogue(
+            256, None, 'secret', sous_type=asyncvnc2.RSA_AES_SUBTYPE_PASS, chiffre_session=False
+        )
+        self.assertEqual(recu, (b'', b'secret'))
+
+    async def test_ra2r_seconde_derivation(self):
+        # Issue #26, variante RA2r : nouvel échange d'aléas sous AES-EAX,
+        # nouvelles clés de session, index de message repartant de zéro.
+        (lecteur, ecrivain, _), recu, _ = await self._dialogue(
+            128, 'utilisatrice', 'secret', seconde_derivation=True
+        )
+        identifiant, mdp, alea_client_2, cles_tour_1, cles_tour_2 = recu
+        self.assertEqual((identifiant, mdp), (b'utilisatrice', b'secret'))
+        self.assertEqual(len(alea_client_2), 16)
+        self.assertNotEqual(cles_tour_1[0], cles_tour_2[0])
+        self.assertNotEqual(cles_tour_1[1], cles_tour_2[1])
+        # Le SecurityResult chiffré sous les NOUVELLES clés se relit : sans
+        # re-dérivation côté client, le tag EAX serait rejeté.
+        self.assertEqual(await lecteur.readexactly(4), bytes(4))
+        ecrivain.close()
+        await ecrivain.wait_closed()
+
+    async def test_ra2r_256_seconde_derivation(self):
+        (_, _, _), recu, _ = await self._dialogue(
+            256, None, 'secret', sous_type=asyncvnc2.RSA_AES_SUBTYPE_PASS, seconde_derivation=True
+        )
+        _, _, alea_client_2, cles_tour_1, cles_tour_2 = recu
+        self.assertEqual(len(alea_client_2), 32)
+        self.assertNotEqual(cles_tour_1[0], cles_tour_2[0])
 
     async def test_identifiants_manquants_ou_trop_longs(self):
         cas = {
@@ -1703,6 +1801,37 @@ class AuthApple33Tests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaisesRegex(PermissionError, 'Auth failed'):
             await Client.create(_reader_from(flux), _FakeWriter(), username='u', password='p')
+
+
+class PreferenceVariantesRsaTests(unittest.IsolatedAsyncioTestCase):
+    """Issue #26 : ordre de préférence des variantes RSA-AES dans Client.create().
+
+    Le serveur n'envoie que la liste des types offerts ; le client choisit
+    le premier qu'il préfère puis tente la négociation RSA-AES, qui échoue
+    ici sur un flux vide (fin de lecture) -- seul le type choisi (dernier
+    octet écrit) importe.
+    """
+
+    async def _type_choisi(self, offerts):
+        flux = b'RFB 003.008\n' + bytes([len(offerts)]) + bytes(offerts)
+        ecrivain = _FakeWriter()
+        with self.assertRaises(asyncio.IncompleteReadError):
+            await Client.create(_reader_from(flux), ecrivain, username='u', password='p')
+        return ecrivain.sent[-1]
+
+    async def test_ordre_de_preference(self):
+        # 256 avant 128, chiffré de bout en bout (RA2 puis RA2r) avant
+        # RA2ne, qui ne chiffre que la poignée de main.
+        ordre = [129, 5, 133, 13, 130, 6]
+        for i, attendu in enumerate(ordre):
+            with self.subTest(attendu=attendu):
+                self.assertEqual(await self._type_choisi(list(reversed(ordre[i:]))), attendu)
+
+    async def test_les_six_variantes_sont_acceptees(self):
+        for type_ in (129, 5, 133, 13, 130, 6):
+            with self.subTest(type=type_):
+                # Un seul type offert : choisi (pas de rejet « type non géré »).
+                self.assertEqual(await self._type_choisi([type_]), type_)
 
 
 class AuthVncLatin1Tests(unittest.IsolatedAsyncioTestCase):

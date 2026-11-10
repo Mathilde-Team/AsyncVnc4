@@ -892,15 +892,16 @@ async def _vencrypt_negotiate(
 # implemented from scratch here, since nothing in Python's standard library
 # or in `cryptography` does either for us the way `ssl`/`start_tls()` does
 # for VeNCrypt. Two sibling security types exist for each -- RA2ne/RA2ne_256
-# ("only the handshake is encrypted, SecurityResult and everything after
-# stays in the clear") and RA2r/RA2r_256 ("a second round of key derivation
-# after the credentials, this time over AES-EAX instead of RSA") -- neither
-# is implemented here: RA2ne trades away exactly the property that makes
-# RA2 worth having in the first place, and RA2r's extra round buys a
-# marginal property (forward secrecy for a hypothetical RSA key compromise
-# discovered mid-session) at real extra complexity, for a fork that only
-# needs to interoperate as a client, not to hedge against every possible
-# server hardening choice. Confirmed real values by reading TigerVNC's own
+# (security types 6/130, "only the handshake is encrypted, SecurityResult
+# and everything after stays in the clear") and RA2r/RA2r_256 (security
+# types 13/133, "a second round of key derivation after the credentials,
+# this time over AES-EAX instead of RSA") -- both implemented here since
+# the 2026-11-10 follow-up (issue #26): a server can legitimately offer
+# only these variants, and refusing them sealed the connection for
+# nothing. The handshake bytes are shared with RA2/RA2_256; each variant
+# only changes what happens at the end of _rsa_aes_negotiate() (raw
+# streams handed back instead of the EAX ones for RA2ne, one extra
+# random-exchange round for RA2r). Confirmed real values by reading TigerVNC's own
 # client, common/rfb/{CSecurityRSAAES.cxx,CSecurityRSAAES.h} and
 # common/rdr/{AESInStream,AESOutStream}.cxx (2026-09-15) -- several details
 # below (the AES key size actually being 128/256 rather than matching the
@@ -1108,20 +1109,48 @@ async def _rsa_aes_negotiate(
     key_bits: int,
     username: str | None,
     password: str | None,
+    *,
+    chiffre_session: bool = True,
+    seconde_derivation: bool = False,
 ):
     """
-    Runs the full RSA-AES (security type 5, `key_bits=128`) or RSA-AES-256
-    (security type 129, `key_bits=256`) handshake and returns
-    (new_reader, new_writer, server_key_fingerprint) -- from this point on
-    the ENTIRE connection is wrapped in AES-EAX (unlike VeNCrypt, this is
-    not optional/sub-typed here: only the fully-encrypted RA2/RA2_256
-    variants are implemented, see the comment above RSA_AES_MIN_KEY_LENGTH).
-    The caller (Client.create()) still has to read the final SecurityResult
-    the same as for any other security type -- but over the now-returned,
-    already-encrypted reader/writer, since unlike VeNCrypt's plain TLS
-    upgrade, RSA-AES's own spec explicitly folds SecurityResult itself into
-    the encrypted stream ("After that the server continues with the
-    encrypted SecurityResult message").
+    Runs the full RSA-AES (security types 5/6/13, `key_bits=128`) or
+    RSA-AES-256 (security types 129/130/133, `key_bits=256`) handshake and
+    returns (new_reader, new_writer, server_key_fingerprint). The four
+    variants added for issue #26 share every handshake byte with RA2/RA2_256
+    and only differ at the very end (see the comment above
+    RSA_AES_MIN_KEY_LENGTH):
+
+    * `chiffre_session=False` (RA2ne/RA2ne_256, security types 6/130): the
+      handshake itself is encrypted exactly like RA2, but SecurityResult and
+      everything after stays in the clear -- the raw reader/writer are
+      returned instead of the EAX ones, and the caller reads the
+      SecurityResult over them like for any unencrypted security type.
+    * `seconde_derivation=True` (RA2r/RA2r_256, security types 13/133):
+      after the credentials, one extra round of key derivation (rfbproto.rst
+      "RSA-AES Two-step Security Type"): two NEW random numbers are
+      exchanged, this time encrypted with the current AES-EAX stream
+      instead of RSA, a new pair of session keys is derived from them the
+      same way as round one, and the returned EAX reader/writer use those
+      new keys with the message index reset to zero (fresh objects).
+
+    Caveat specific to RA2r: no open implementation of the two-step round
+    exists to cross-check against -- TigerVNC's own client (both sides of
+    it, `CSecurityRSAAES`/`SSecurityRSAAES`) only implements RA2/RA2ne, not
+    RA2r, and RealVNC's is proprietary. The reading followed here is the
+    spec's own prose, with one assumption documented: the client sends its
+    new random first, then reads the server's -- the same order as round
+    one (where TigerVNC's client also writes before reading), which is the
+    only precedent this format has. The default `chiffre_session=True,
+    seconde_derivation=False` (RA2/RA2_256) keeps the ENTIRE connection
+    wrapped in AES-EAX (unlike VeNCrypt, this is not optional/sub-typed
+    here). The caller (Client.create()) still has to read the final
+    SecurityResult the same as for any other security type -- but over the
+    now-returned, already-encrypted reader/writer, since unlike VeNCrypt's
+    plain TLS upgrade, RSA-AES's own spec explicitly folds SecurityResult
+    itself into the encrypted stream ("After that the server continues with
+    the encrypted SecurityResult message"); RA2ne is the one exception that
+    reads it in the clear.
 
     Byte format verified against rfbproto.rst ("RSA-AES Security Type"/
     "RSA-AES-256 Security Type") **and** against TigerVNC's own client
@@ -1288,6 +1317,56 @@ async def _rsa_aes_negotiate(
     credentials += bytes([len(password_bytes)]) + password_bytes
     eax_writer.write(credentials)
     await eax_writer.drain()
+
+    if seconde_derivation:
+        # RA2r/RA2r_256 : seconde ronde de dérivation (rfbproto.rst, « RSA-AES
+        # Two-step Security Type ») -- le client envoie son nouvel aléa le
+        # premier puis lit celui du serveur, comme à la première ronde (seul
+        # précédent disponible : TigerVNC écrit avant de lire à la ronde 1 ;
+        # voir la docstring pour le statut de cette hypothèse). Les deux
+        # aléas transitent chiffrés en AES-EAX, plus par RSA. Les nouvelles
+        # clés reprennent la même dérivation que la ronde 1, et les objets
+        # EAX neufs repartent avec leur index de message à zéro, comme
+        # l'exige la spec. Rien n'indique qu'un échange de hachage des clés
+        # publiques accompagne cette ronde : la spec n'en parle pas, on n'en
+        # envoie pas.
+        logger.debug('_rsa_aes_negotiate() seconde dérivation | début')
+        client_random_2 = urandom(random_size)
+        eax_writer.write(client_random_2)
+        await eax_writer.drain()
+        server_random_2 = await eax_reader.readexactly(random_size)
+        if len(server_random_2) != random_size:
+            _erreur = ValueError(
+                'RSA-AES two-step : nouvel aléa serveur de taille inattendue '
+                f'({len(server_random_2)} octets, {random_size} attendus)'
+            )
+            logger.debug('_rsa_aes_negotiate() lève | {!r}', _erreur)
+            raise _erreur
+        # Même convention de nommage qu'à la ronde 1 juste au-dessus : la clé
+        # « client_session_key » chiffre ce que le CLIENT envoie, la clé
+        # « server_session_key » ce que le SERVEUR envoie (donc ce que le
+        # client lit) -- l'ordre des aléas dans le hachage est celui de
+        # CSecurityRSAAES::setCipher(), reproduit à l'identique ici.
+        client_session_key = hash_algorithm(server_random_2 + client_random_2).digest()[
+            : key_bits // 8
+        ]
+        server_session_key = hash_algorithm(client_random_2 + server_random_2).digest()[
+            : key_bits // 8
+        ]
+        eax_reader = _EAXReader(reader, server_session_key)
+        eax_writer = _EAXWriter(writer, client_session_key)
+        logger.debug('_rsa_aes_negotiate() seconde dérivation | nouvelles clés en place')
+
+    if not chiffre_session:
+        # RA2ne/RA2ne_256 : seule la poignée de main est chiffrée ; le
+        # SecurityResult et tout ce qui suit restent en clair -- on rend
+        # les flux bruts, l'appelant relit le SecurityResult comme pour un
+        # type de sécurité non chiffré.
+        logger.debug(
+            '_rsa_aes_negotiate() retourne | (flux bruts, len(server_key_fingerprint)={})',
+            len(server_key_fingerprint),
+        )
+        return reader, writer, server_key_fingerprint
 
     logger.debug(
         '_rsa_aes_negotiate() retourne | (eax_reader, eax_writer, len(server_key_fingerprint)={})',
@@ -3275,7 +3354,8 @@ class Client:
 
     #: RealVNC-style fingerprint (`%02x-%02x-...`, first 8 bytes of a
     #: SHA-1 digest) of the server's RSA-AES public key, if the connection
-    #: used security type 5 (RA2) or 129 (RA2_256) -- see
+    #: used security type 5 (RA2), 129 (RA2_256), 6/130 (RA2ne) or 13/133
+    #: (RA2r) -- see
     #: _rsa_aes_negotiate()'s docstring for exactly what this is a hash of
     #: and why this fork does not itself compare it against anything (no
     #: pinning storage at this layer, unlike host_key's optional reuse for
@@ -3427,6 +3507,13 @@ class Client:
             # (129=RA2_256, 5=RA2, ajoutés le 2026-09-15) est classé encore
             # après, pour la même raison (neuf) ; 256 avant 128 entre les
             # deux, comme pour X509Vnc/X509Plain/X509None dans VeNCrypt.
+            # Les variantes issues #26 (2026-11-10) suivent le même principe
+            # : RA2r (133/13) juste après RA2 -- chiffrées de bout en bout
+            # comme lui, une ronde de dérivation en plus -- puis RA2ne
+            # (130/6) en dernier du groupe : ne chiffrer que la poignée de
+            # main retire justement la propriété qui fait la valeur de
+            # RA2, on ne la choisit que si le serveur ne propose rien de
+            # mieux.
             # MSLogonII (113, ajouté le 2026-09-16) est classé tout
             # dernier avant SASL : au-delà d'être neuf et jamais testé
             # contre un vrai serveur, sa clé Diffie-Hellman de 64 bits est
@@ -3443,7 +3530,7 @@ class Client:
             # directement sur le fil sans aucune couche de chiffrement
             # propre (contrairement aux sous-types VeNCrypt "...SASL" de
             # la spec, hors périmètre ici -- voir docs/features-backlog.md).
-            for auth_type in (33, 1, 2, 19, 129, 5, 113, 20):
+            for auth_type in (33, 1, 2, 19, 129, 5, 133, 13, 130, 6, 113, 20):
                 if auth_type in auth_types:
                     writer.write(auth_type.to_bytes(1, 'big'))
                     break
@@ -3521,19 +3608,32 @@ class Client:
             # main RFB générique dans laquelle il s'insère).
 
         # RSA-AES (5=RA2, AES-128 ; 129=RA2_256, AES-256 -- ajoutés le
-        # 2026-09-15) -- voir _rsa_aes_negotiate() pour le détail complet du
+        # 2026-09-15 ; variantes 6/130/13/133 ajoutées le 2026-11-10, issue
+        # #26) -- voir _rsa_aes_negotiate() pour le détail complet du
         # format et son origine (rfbproto.rst + code source TigerVNC).
         # Contrairement à VeNCrypt ci-dessus, `reader`/`writer` pointent
         # ensuite vers un chiffrement AES-EAX construit dans ce fichier
-        # (pas une bibliothèque standard comme `ssl`) -- et le
+        # (pas une bibliothèque standard comme `ssl`), sauf RA2ne qui rend
+        # les flux bruts après la poignée de main -- et le
         # SecurityResult lui-même est déjà chiffré à ce stade (propre à
         # RSA-AES, voir la docstring de _rsa_aes_negotiate()), contrairement
         # à VeNCrypt où seule la poignée de main TLS précède un
         # SecurityResult en clair (ou plutôt : en clair du point de vue de
         # cette fonction, TLS le chiffrant lui-même au niveau du transport).
-        if auth_type in (5, 129):
+        if auth_type in (5, 129, 13, 133, 6, 130):
+            # Variantes issues #26 : 256 bits pour RA2_256/RA2ne_256/RA2r_256
+            # (129/130/133), 128 pour RA2/RA2ne/RA2r (5/6/13) ; RA2ne
+            # (6/130) rend des flux en clair après la poignée de main, RA2r
+            # (13/133) ajoute la seconde ronde de dérivation -- voir
+            # _rsa_aes_negotiate().
             reader, writer, rsa_aes_server_key_fingerprint = await _rsa_aes_negotiate(
-                reader, writer, 128 if auth_type == 5 else 256, username, password
+                reader,
+                writer,
+                256 if auth_type in (129, 130, 133) else 128,
+                username,
+                password,
+                chiffre_session=auth_type not in (6, 130),
+                seconde_derivation=auth_type in (13, 133),
             )
 
         # Apple authentication
